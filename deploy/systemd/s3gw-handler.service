@@ -1,0 +1,14 @@
+[Unit]
+Description=S3 change handler: syncs journaled keys to the new storage
+After=s3gw-gateway.service
+
+[Service]
+User=s3gw
+EnvironmentFile=/etc/s3gw/s3gw.env
+WorkingDirectory=/opt/elma365_s3_migrator
+ExecStart=/opt/elma365_s3_migrator/.venv/bin/python -m s3gw.handler
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# Файлы, которые читают bash, systemd и haproxy на серверах: всегда LF, даже в рабочей копии Windows.
+*.sh         text eol=lf
+*.service    text eol=lf
+*.template   text eol=lf
+*.example    text eol=lf

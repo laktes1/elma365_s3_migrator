@@ -1,0 +1,9 @@
+[Unit]
+Description=s3gw: journal backup to another disk
+
+[Service]
+Type=oneshot
+User=s3gw
+EnvironmentFile=/etc/s3gw/s3gw.env
+Environment=BACKUP_DIR=/backup/s3gw KEEP=2
+ExecStart=/opt/elma365_s3_migrator/deploy/systemd/s3gw-journal-backup.sh

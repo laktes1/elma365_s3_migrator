@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/*
+!.claude/skills/
+
+# Runtime state and logs of scripts/st*.sh
+.runtime/
+*.log
+manifests-s3elma365/
+temp_folder/
+
+# Old configs with credentials (scripts/.env and per-stage files), kept out of git
+scripts/.env*
+
+# Inputs and reports of specific runs (ids.txt, doc_files.xlsx, ...)
+run/

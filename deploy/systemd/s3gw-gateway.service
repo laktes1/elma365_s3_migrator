@@ -1,0 +1,19 @@
+[Unit]
+Description=S3 gateway with intent journal (s3elma365)
+After=network-online.target
+Wants=network-online.target
+# без предела перезапусков: после серии падений юнит не должен остаться в failed,
+# пока nginx на minio2 шлёт в него запись s3elma365 (PIPELINE.md, A4)
+StartLimitIntervalSec=0
+
+[Service]
+User=s3gw
+EnvironmentFile=/etc/s3gw/s3gw.env
+WorkingDirectory=/opt/elma365_s3_migrator
+ExecStart=/opt/elma365_s3_migrator/.venv/bin/python -m s3gw.gateway
+Restart=always
+RestartSec=1
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

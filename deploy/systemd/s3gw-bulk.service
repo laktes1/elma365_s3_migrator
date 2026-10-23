@@ -1,0 +1,14 @@
+[Unit]
+Description=S3 bulk transfer (resumes from checkpoints; start manually, task 09)
+After=s3gw-gateway.service
+
+[Service]
+Type=exec
+User=s3gw
+EnvironmentFile=/etc/s3gw/s3gw.env
+WorkingDirectory=/opt/elma365_s3_migrator
+ExecStart=/opt/elma365_s3_migrator/.venv/bin/python -m s3gw.bulk run
+Restart=on-failure
+# 2: finished with job or range errors, nothing to restart for (PIPELINE.md, B5)
+RestartPreventExitStatus=2
+RestartSec=30

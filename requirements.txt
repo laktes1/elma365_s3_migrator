@@ -1,0 +1,8 @@
+# Проверено на Python 3.11. Шлюз зависит от поведения aiohttp, обновлять вместе с прогоном scripts/stand_pipeline.py.
+aiohttp==3.14.5
+# часовые пояса для SCHEDULE_TZ, если в системе нет базы tzdata
+tzdata==2026.5
+yarl==1.25.1
+boto3==1.43.116
+botocore==1.43.116
+s3transfer==0.19.3

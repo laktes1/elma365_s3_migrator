@@ -1,0 +1,791 @@
+<meta charset="utf-8">
+<title>Конвейер миграции s3elma365</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one 1240px column; the topology figure leads, reference sections (components, key states, rules, stages, failures) follow */
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --surface-2: #eaeef3;
+  --ink: #131a23;
+  --muted: #586273;
+  --line: #d2d8e0;
+  --line-strong: #98a3b2;
+  --p1: #2b58cc;      --p1-tint: #e8eefc;   /* процесс 1: журнал */
+  --p2: #bb4f08;      --p2-tint: #fcefe4;   /* процесс 2: перенос */
+  --db: #6847c2;      --db-tint: #efebfb;   /* базы SQLite */
+  --dst: #11784a;     --dst-tint: #e4f4eb;  /* новое S3 */
+  --src: #4f5d70;     --src-tint: #e6eaf0;  /* MinIO и прямые чтения */
+  --bad: #be2a2a;     --bad-tint: #fbe9e9;
+  --warn: #9a6300;    --warn-tint: #faf0d8;
+  --font-sans: "Golos Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", Consolas, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1217; --surface: #161b22; --surface-2: #1c232c; --ink: #e5eaf0; --muted: #9ba6b4;
+    --line: #2a333e; --line-strong: #4d5969;
+    --p1: #82a5ff; --p1-tint: #1a2440; --p2: #f39a55; --p2-tint: #33231a;
+    --db: #b59eff; --db-tint: #251e3c; --dst: #50c98c; --dst-tint: #14291e;
+    --src: #a2b2c4; --src-tint: #1f2731; --bad: #ff7d7d; --bad-tint: #3a1c1c;
+    --warn: #e6b44c; --warn-tint: #2f2614;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1217; --surface: #161b22; --surface-2: #1c232c; --ink: #e5eaf0; --muted: #9ba6b4;
+  --line: #2a333e; --line-strong: #4d5969;
+  --p1: #82a5ff; --p1-tint: #1a2440; --p2: #f39a55; --p2-tint: #33231a;
+  --db: #b59eff; --db-tint: #251e3c; --dst: #50c98c; --dst-tint: #14291e;
+  --src: #a2b2c4; --src-tint: #1f2731; --bad: #ff7d7d; --bad-tint: #3a1c1c;
+  --warn: #e6b44c; --warn-tint: #2f2614;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 56px;
+}
+main { max-width: 1240px; margin: 0 auto; display: grid; gap: 64px; }
+section { display: grid; gap: 20px; min-width: 0; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 24px; line-height: 1.25; font-weight: 650; }
+h3 { font-size: 16px; font-weight: 600; }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+code { background: var(--surface-2); border-radius: 4px; padding: 0.05em 0.35em; }
+a { color: var(--p1); }
+a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--p1); outline-offset: 3px; }
+
+.eyebrow { font-family: var(--font-mono); font-size: 12.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 16px; }
+.lead { font-size: 17px; max-width: 68ch; color: var(--ink); }
+.section-note { color: var(--muted); max-width: 72ch; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 10px 26px; font-size: 13.5px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 9px; }
+.legend i { display: inline-block; width: 30px; border-top: 2.5px solid; }
+.legend .l-p1 { border-color: var(--p1); }
+.legend .l-p2 { border-color: var(--p2); }
+.legend .l-src { border-color: var(--src); }
+.legend .l-db { border-color: var(--db); border-top-style: dashed; }
+.legend .l-svc { border-color: var(--line-strong); border-top-style: dotted; }
+
+/* ---------- figure ---------- */
+.figure { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.scroll-x { overflow-x: auto; min-width: 0; }
+.figure svg { display: block; width: 100%; height: auto; }
+#topo { min-width: 980px; }
+#states { min-width: 760px; }
+.fig-hint { font-size: 13px; color: var(--muted); }
+
+.grp { fill: var(--surface-2); stroke: var(--line-strong); stroke-width: 1.2; }
+.grp-k8s { fill: none; stroke: var(--line-strong); stroke-dasharray: 6 5; }
+.grp-title { font: 600 14px var(--font-sans); fill: var(--ink); }
+.grp-sub { font: 400 12px var(--font-sans); fill: var(--muted); }
+.grp-cap { font: 600 11px var(--font-mono); letter-spacing: 0.08em; fill: var(--muted); }
+
+.edge path { fill: none; stroke-width: 1.8; }
+.e-in path { stroke: var(--line-strong); }
+.e-src path { stroke: var(--src); }
+.e-p1 path { stroke: var(--p1); stroke-width: 2.2; }
+.e-p2 path { stroke: var(--p2); stroke-width: 2.2; }
+.e-db path { stroke: var(--db); stroke-dasharray: 6 4; }
+.e-svc path { stroke: var(--line-strong); stroke-dasharray: 2 4; stroke-linecap: round; }
+.m-in { fill: var(--line-strong); } .m-src { fill: var(--src); } .m-p1 { fill: var(--p1); }
+.m-p2 { fill: var(--p2); } .m-db { fill: var(--db); } .m-svc { fill: var(--line-strong); }
+.elabel { font: 500 10.5px var(--font-sans); fill: var(--muted); paint-order: stroke; stroke: var(--surface-2); stroke-width: 4px; stroke-linejoin: round; }
+.elabel.mono { font-family: var(--font-mono); font-size: 9.8px; }
+.e-p1 .elabel { fill: var(--p1); } .e-p2 .elabel { fill: var(--p2); } .e-db .elabel { fill: var(--db); }
+
+.nd { cursor: pointer; outline: none; }
+.nd .box {
+  width: 100%; height: 100%; overflow: hidden;
+  background: var(--surface); color: var(--ink);
+  border: 1.5px solid var(--line-strong); border-radius: 8px;
+  padding: 7px 9px; font-size: 11px; line-height: 1.36;
+  display: flex; flex-direction: column; gap: 3px;
+  transition: box-shadow .15s, opacity .15s;
+}
+.nd:hover .box, .nd:focus-visible .box { box-shadow: 0 0 0 3px var(--surface-2), 0 0 0 4.5px currentColor; }
+.box .bh { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.box .bh b { font-size: 13.5px; font-weight: 650; }
+.box .sm { font-size: 10px; color: var(--muted); }
+.box .mono { font-size: 10px; }
+.box p { margin: 0; }
+.box .muted { color: var(--muted); }
+.box hr { border: 0; border-top: 1px solid var(--line); margin: 3px 0; width: 100%; }
+.box ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.box .route { display: grid; gap: 1px; }
+.box .route .mono { color: var(--muted); }
+.tag { font: 600 9.5px var(--font-sans); letter-spacing: 0.03em; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+.chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.chips span { font-family: var(--font-mono); font-size: 9.5px; padding: 0 5px; border-radius: 4px; background: var(--db-tint); color: var(--db); }
+.badge { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 5px; align-self: flex-start; }
+
+.k-p1 { border-color: var(--p1) !important; color: var(--p1); }
+.k-p2 { border-color: var(--p2) !important; color: var(--p2); }
+.k-db { border-color: var(--db) !important; color: var(--db); }
+.k-src { border-color: var(--src) !important; color: var(--src); }
+.k-dst { border-color: var(--dst) !important; color: var(--dst); }
+.k-in { color: var(--line-strong); }
+.k-svc { border-style: dashed !important; color: var(--line-strong); }
+.nd .box > * { color: var(--ink); }
+.nd .box .sm, .nd .box .muted, .nd .box .route .mono { color: var(--muted); }
+.t-p1 { background: var(--p1-tint); color: var(--p1) !important; }
+.t-p2 { background: var(--p2-tint); color: var(--p2) !important; }
+.t-db { background: var(--db-tint); color: var(--db) !important; }
+.t-src { background: var(--src-tint); color: var(--src) !important; }
+.t-dst { background: var(--dst-tint); color: var(--dst) !important; }
+.t-warn { background: var(--warn-tint); color: var(--warn) !important; }
+.t-bad { background: var(--bad-tint); color: var(--bad) !important; }
+
+#topo .edge, #topo .nd { transition: opacity .15s; }
+#topo.focusing .edge:not(.on) { opacity: 0.12; }
+#topo.focusing .nd:not(.on) { opacity: 0.38; }
+
+/* ---------- components ---------- */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: grid; gap: 10px; align-content: start; min-width: 0; scroll-margin-top: 24px; }
+.card.flash { animation: flash 1.4s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px var(--p1); } 100% { box-shadow: 0 0 0 3px transparent; } }
+.card-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.card-h h3 { font-family: var(--font-mono); font-size: 15.5px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.d-p1 { background: var(--p1); } .d-p2 { background: var(--p2); } .d-db { background: var(--db); }
+.d-src { background: var(--src); } .d-dst { background: var(--dst); } .d-svc { background: var(--line-strong); }
+.card .where { font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.card .tag { font-size: 11px; padding: 2px 8px; }
+.card ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 14px; }
+.card li::marker { color: var(--line-strong); }
+.card p { font-size: 14px; }
+
+/* ---------- states ---------- */
+.st rect { stroke-width: 1.6; }
+.st text { font: 600 13px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+.st-none rect { fill: var(--surface); stroke: var(--line-strong); stroke-dasharray: 4 3; } .st-none text { fill: var(--muted); font-family: var(--font-sans); font-weight: 500; }
+.st-p1 rect { fill: var(--p1-tint); stroke: var(--p1); } .st-p1 text { fill: var(--p1); }
+.st-p2 rect { fill: var(--p2-tint); stroke: var(--p2); } .st-p2 text { fill: var(--p2); }
+.st-ok rect { fill: var(--dst-tint); stroke: var(--dst); } .st-ok text { fill: var(--dst); }
+.st-bad rect { fill: var(--bad-tint); stroke: var(--bad); } .st-bad text { fill: var(--bad); }
+.st-warn rect { fill: var(--warn-tint); stroke: var(--warn); } .st-warn text { fill: var(--warn); }
+.sl { font: 500 11px var(--font-sans); fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.sl-c { text-anchor: middle; }
+.se { fill: none; stroke: var(--line-strong); stroke-width: 1.6; }
+.se-p1 { stroke: var(--p1); } .se-p2 { stroke: var(--p2); } .se-warn { stroke: var(--warn); } .se-bad { stroke: var(--bad); }
+.m-ink { fill: var(--line-strong); } .m-bad { fill: var(--bad); } .m-warn { fill: var(--warn); } .m-ok { fill: var(--dst); }
+.se-ok { stroke: var(--dst); }
+.foot { font-size: 13.5px; color: var(--muted); }
+
+/* ---------- rules ---------- */
+.rules { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px 28px; margin: 0; padding: 0; list-style: none; }
+.rules li { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 4px; align-content: start; font-size: 14.5px; }
+.rules b { font-weight: 650; }
+
+/* ---------- stages ---------- */
+.stages { display: grid; grid-template-columns: 150px repeat(3, minmax(0, 1fr)); grid-template-rows: auto auto auto; gap: 10px; }
+.col { display: grid; grid-row: span 3; grid-template-rows: subgrid; gap: 10px; min-width: 0; }
+.st-head { padding: 12px 26px 12px 16px; background: var(--surface-2); color: var(--ink); clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 50%, calc(100% - 16px) 100%, 0 100%); display: grid; gap: 2px; }
+.st-head b { font-size: 15px; }
+.st-head span { font-size: 13px; color: var(--muted); }
+.lane-name { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 12px 14px; border-radius: 10px; font-size: 13px; color: var(--muted); }
+.lane-name b { font-size: 14px; }
+.ln-p1 { background: var(--p1-tint); } .ln-p1 b { color: var(--p1); }
+.ln-p2 { background: var(--p2-tint); } .ln-p2 b { color: var(--p2); }
+.cell { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13.5px; min-width: 0; }
+.cell.c-p1 { border-top: 2.5px solid var(--p1); }
+.cell.c-p2 { border-top: 2.5px solid var(--p2); }
+.cell ul { margin: 0; padding-left: 16px; display: grid; gap: 4px; }
+.cell .lane-tag { display: none; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.c-p1 .lane-tag { color: var(--p1); } .c-p2 .lane-tag { color: var(--p2); }
+.blank { visibility: hidden; }
+@media (max-width: 860px) {
+  .stages { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .col { grid-row: auto; grid-template-rows: none; }
+  .col.lanes { display: none; }
+  .cell .lane-tag { display: block; }
+}
+
+/* ---------- failures ---------- */
+table { border-collapse: collapse; width: 100%; min-width: 720px; font-size: 14px; background: var(--surface); }
+th, td { text-align: left; vertical-align: top; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); background: var(--surface-2); }
+td:first-child { font-weight: 600; width: 22%; }
+.table-wrap { border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
+tr:last-child td { border-bottom: 0; }
+
+footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">elma365_s3_migrator · PIPELINE.md · minio2</div>
+    <h1>Конвейер миграции s3elma365: MinIO → новое S3</h1>
+    <p class="lead">Два процесса работают параллельно на <code>minio2</code> (10.10.0.12) рядом с MinIO и делят одну базу состояния ключей <code>journal.db</code>. Журнал ловит каждое изменение ELMA365 и приводит ключ в новом S3 к текущему состоянию MinIO. Перенос перечисляет весь бакет и копирует то, чего журнал не касался.</p>
+    <div class="legend" aria-label="Обозначения">
+      <span><i class="l-p1"></i>процесс 1: журнал изменений</span>
+      <span><i class="l-p2"></i>процесс 2: перенос</span>
+      <span><i class="l-src"></i>чтения и другие бакеты, без журнала</span>
+      <span><i class="l-db"></i>работа с базой SQLite</span>
+      <span><i class="l-svc"></i>служебное: бэкап, проверка</span>
+    </div>
+  </header>
+
+  <section aria-labelledby="h-topo">
+    <h2 id="h-topo">Схема на этапах A и B</h2>
+    <div class="figure">
+      <div class="scroll-x">
+        <svg id="topo" viewBox="0 0 1200 760" role="img" aria-label="Схема компонентов миграции на minio2">
+          <defs>
+            <marker id="a-in" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-in" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a-src" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-src" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a-p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="m-p1" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a-p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="m-p2" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a-db" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-db" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a-svc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-svc" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- groups -->
+          <rect class="grp-k8s" x="12" y="120" width="168" height="278" rx="12"/>
+          <text class="grp-cap" x="24" y="142">KUBERNETES</text>
+          <text class="grp-sub" x="24" y="110">не меняется</text>
+          <rect class="grp" x="196" y="20" width="820" height="730" rx="14"/>
+          <text class="grp-title" x="214" y="46">minio2 · 10.10.0.12</text>
+          <text class="grp-sub" x="372" y="46">всё на одной машине рядом с MinIO, под systemd</text>
+
+          <!-- edges -->
+          <g class="edge e-in" data-link="elma ingress"><path d="M96,236 V254" marker-end="url(#a-in)"/></g>
+          <g class="edge e-in" data-link="ingress haproxy"><path d="M96,294 V312" marker-end="url(#a-in)"/></g>
+          <g class="edge e-in" data-link="haproxy nginx"><path d="M168,348 H210" marker-end="url(#a-in)"/></g>
+          <g class="edge e-in" data-link="others nginx"><path d="M168,455 H210" marker-end="url(#a-in)"/></g>
+
+          <g class="edge e-src" data-link="nginx minio">
+            <path d="M287,210 V110 H418" marker-end="url(#a-src)"/>
+            <text class="elabel" x="296" y="87">чтения s3elma365</text>
+            <text class="elabel" x="296" y="101">и другие бакеты</text>
+          </g>
+          <g class="edge e-p1" data-link="nginx gateway">
+            <path d="M362,290 H418" marker-end="url(#a-p1)"/>
+            <text class="elabel" x="391" y="282" text-anchor="middle">запись</text>
+          </g>
+          <g class="edge e-p1" data-link="gateway minio">
+            <path d="M535,210 V158" marker-end="url(#a-p1)"/>
+            <text class="elabel" x="544" y="180">② запрос как есть</text>
+            <text class="elabel mono" x="544" y="195">+ X-S3gw-Request-Id</text>
+          </g>
+          <g class="edge e-db" data-link="gateway journal">
+            <path d="M535,370 V428" marker-end="url(#a-db)"/>
+            <text class="elabel" x="544" y="394">① намерение до MinIO</text>
+            <text class="elabel" x="544" y="409">③ результат после</text>
+          </g>
+          <g class="edge e-p1" data-link="handler minio">
+            <path d="M820,210 V158" marker-end="url(#a-p1)"/>
+            <text class="elabel" x="829" y="188">GET</text>
+          </g>
+          <g class="edge e-db" data-link="journal handler">
+            <path d="M652,452 H698" marker-start="url(#a-db)" marker-end="url(#a-db)"/>
+            <text class="elabel" x="675" y="444" text-anchor="middle">аренда</text>
+          </g>
+          <g class="edge e-db" data-link="journal bulk">
+            <path d="M652,545 H698" marker-start="url(#a-db)" marker-end="url(#a-db)"/>
+            <text class="elabel" x="675" y="537" text-anchor="middle">аренда</text>
+          </g>
+          <g class="edge e-db" data-link="bulkdb bulk">
+            <path d="M652,690 H698" marker-start="url(#a-db)" marker-end="url(#a-db)"/>
+            <text class="elabel" x="675" y="682" text-anchor="middle">задания</text>
+          </g>
+          <g class="edge e-p2" data-link="bulk minio">
+            <path d="M940,540 H966 V158" marker-end="url(#a-p2)"/>
+            <text class="elabel" x="985" y="410" text-anchor="middle" transform="rotate(-90 985 410)">ListObjectsV2 · GET</text>
+          </g>
+          <g class="edge e-p1" data-link="handler news3">
+            <path d="M940,300 H958 A8,8 0 0 1 974,300 H1054" marker-end="url(#a-p1)"/>
+            <text class="elabel" x="1015" y="291" text-anchor="middle">PUT · DELETE</text>
+          </g>
+          <g class="edge e-p2" data-link="bulk news3">
+            <path d="M940,640 H1054" marker-end="url(#a-p2)"/>
+            <text class="elabel" x="998" y="631" text-anchor="middle">PUT</text>
+          </g>
+          <g class="edge e-svc" data-link="journal backup">
+            <path d="M420,555 H364" marker-end="url(#a-svc)"/>
+            <text class="elabel" x="391" y="548" text-anchor="middle">копия</text>
+          </g>
+          <g class="edge e-svc" data-link="tracecheck journal">
+            <path d="M362,690 H392 V570 H418" marker-end="url(#a-svc)"/>
+          </g>
+
+          <!-- nodes: Kubernetes -->
+          <g class="nd" data-node="elma" tabindex="0" role="button" aria-label="ELMA365">
+            <foreignObject x="24" y="156" width="144" height="80"><div class="box k-in">
+              <div class="bh"><b>ELMA365</b></div>
+              <p class="muted">файлы, предпросмотр, подписанные ссылки</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="ingress" tabindex="0" role="button" aria-label="ingress-nginx">
+            <foreignObject x="24" y="256" width="144" height="38"><div class="box k-in" style="justify-content:center">
+              <div class="bh"><b>ingress-nginx</b></div>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="haproxy" tabindex="0" role="button" aria-label="haproxy">
+            <foreignObject x="24" y="314" width="144" height="68"><div class="box k-in">
+              <div class="bh"><b>haproxy</b></div>
+              <div class="mono">→ 10.10.0.12:9000</div>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="others" tabindex="0" role="button" aria-label="Другие клиенты">
+            <foreignObject x="24" y="420" width="144" height="86"><div class="box k-in">
+              <div class="bh"><b>Loki · Tempo · бэкапы</b></div>
+              <p class="muted">бакеты elma365-loki, -tempo, -backups</p>
+            </div></foreignObject>
+          </g>
+
+          <!-- nodes: minio2 -->
+          <g class="nd" data-node="minio" data-card="c-minio" tabindex="0" role="button" aria-label="MinIO, подробнее">
+            <foreignObject x="420" y="64" width="560" height="92"><div class="box k-src">
+              <div class="bh"><span><b>MinIO</b>&nbsp;&nbsp;<span class="mono muted">127.0.0.1:9000</span></span><span class="tag t-src">источник</span></div>
+              <p>s3elma365 · ≈12 млн объектов на 16 HDD: каждый лишний запрос к источнику нагружает диски</p>
+              <p class="muted">elma365-backups, -loki, -tempo в миграцию не входят. После A4 MinIO слушает только loopback: снаружи в него можно попасть только через nginx</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="nginx" data-card="c-nginx" tabindex="0" role="button" aria-label="nginx, подробнее">
+            <foreignObject x="212" y="210" width="150" height="290"><div class="box k-in">
+              <div class="bh"><b>nginx</b></div>
+              <div class="mono">10.10.0.12:9000</div>
+              <hr>
+              <div class="route"><span class="mono">GET · HEAD · OPTIONS</span><span>s3elma365 → MinIO</span></div>
+              <div class="route"><span class="mono">PUT · POST · DELETE</span><span style="color:var(--p1);font-weight:600">s3elma365 → шлюз</span></div>
+              <div class="route"><span class="mono">другие бакеты</span><span>→ MinIO</span></div>
+              <hr>
+              <p>шлюз недоступен → <b>502</b>, мимо журнала пути нет</p>
+              <p class="muted">лог только 5xx</p>
+              <hr>
+              <p class="muted">после C2 чтения s3elma365 тоже идут в шлюз</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="gateway" data-card="c-gateway" tabindex="0" role="button" aria-label="s3gw-gateway, подробнее">
+            <foreignObject x="420" y="210" width="230" height="160"><div class="box k-p1">
+              <div class="bh"><b>s3gw-gateway</b><span class="tag t-p1">процесс 1</span></div>
+              <div class="mono muted">127.0.0.1:9100</div>
+              <ol>
+                <li>① намерение в журнал, fsync</li>
+                <li>② запрос в MinIO как есть</li>
+                <li>③ результат: success / error / uncertain</li>
+              </ol>
+              <p class="muted">журнал не ответил за 2 с → 503</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="journal" data-card="c-journal" tabindex="0" role="button" aria-label="journal.db, подробнее">
+            <foreignObject x="420" y="430" width="230" height="150"><div class="box k-db">
+              <div class="bh"><b>journal.db</b><span class="tag t-db">SQLite WAL</span></div>
+              <div class="chips"><span>intents</span><span>key_state</span><span>mpu</span><span>errors</span><span>gateway_epochs</span><span>counters</span></div>
+              <p>Единственная запись о том, какие ключи изменились, и кто сейчас держит ключ</p>
+              <p class="muted">synchronous = FULL</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="bulkdb" data-card="c-bulkdb" tabindex="0" role="button" aria-label="bulk.db, подробнее">
+            <foreignObject x="420" y="640" width="230" height="100"><div class="box k-db">
+              <div class="bh"><b>bulk.db</b><span class="tag t-db">SQLite WAL</span></div>
+              <div class="chips"><span>ranges</span><span>jobs</span><span>control</span></div>
+              <p class="muted">≈12 млн заданий, контрольные точки листинга, пауза и потолки</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="handler" data-card="c-handler" tabindex="0" role="button" aria-label="s3gw-handler, подробнее">
+            <foreignObject x="700" y="210" width="240" height="260"><div class="box k-p1">
+              <div class="bh"><b>s3gw-handler</b><span class="tag t-p1">процесс 1</span></div>
+              <div class="sm">4 потока · аренда ключа 900 с</div>
+              <ol>
+                <li>1. берёт ключ <span class="mono">dirty</span> / <span class="mono">uncertain</span> → <span class="mono">syncing</span></li>
+                <li>2. GET из MinIO: тело и метаданные одной версии</li>
+                <li>3. PUT или multipart в новое S3; нет в MinIO → DELETE</li>
+                <li>4. HEAD-проверка → <span class="mono">synced</span> / <span class="mono">deleted</span></li>
+              </ol>
+              <p class="muted">ключ менялся во время копии → снова dirty; ошибки: повтор 5–600 с, после 20 → error</p>
+              <span class="badge t-warn">нужен DST_* · включается на этапе B</span>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="bulk" data-card="c-bulk" tabindex="0" role="button" aria-label="s3gw-bulk, подробнее">
+            <foreignObject x="700" y="510" width="240" height="230"><div class="box k-p2">
+              <div class="bh"><b>s3gw-bulk</b><span class="tag t-p2">процесс 2</span></div>
+              <p><b>list</b> <span class="muted">· этап A</span><br>256 диапазонов 00…ff → bulk.db, контрольная точка на каждой странице</p>
+              <p><b>copy</b> <span class="muted">· этап B</span><br>только ключи, которых нет в key_state; на время копии берёт аренду</p>
+              <p class="muted">лимит = min(расписание, ручной, отставание журнала)</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="backup" data-card="c-journal" tabindex="0" role="button" aria-label="Бэкап журнала, подробнее">
+            <foreignObject x="212" y="530" width="150" height="84"><div class="box k-svc">
+              <div class="bh"><b>бэкап журнала</b></div>
+              <p class="muted">раз в час → /backup/s3gw, хранятся 2 копии</p>
+            </div></foreignObject>
+          </g>
+          <g class="nd" data-node="tracecheck" data-card="c-checks" tabindex="0" role="button" aria-label="tracecheck, подробнее">
+            <foreignObject x="212" y="640" width="150" height="100"><div class="box k-svc">
+              <div class="bh"><b>tracecheck</b><span class="sm">A6</span></div>
+              <p class="muted">по mc admin trace: каждое изменение прошло через шлюз</p>
+              <div class="mono">bypass 0 · missed 0</div>
+            </div></foreignObject>
+          </g>
+
+          <!-- node: new S3 -->
+          <g class="nd" data-node="news3" data-card="c-news3" tabindex="0" role="button" aria-label="Новое S3, подробнее">
+            <foreignObject x="1056" y="210" width="132" height="530"><div class="box k-dst" style="gap:6px">
+              <div class="bh"><b style="font-size:15px">Новое S3</b></div>
+              <span class="tag t-dst" style="align-self:flex-start">приёмник</span>
+              <p>бакет s3elma365</p>
+              <p class="muted">ключ DST_* пишет только в этот бакет</p>
+              <p class="muted">порт открыт только для minio2</p>
+              <p class="muted">появится на этапе B (задача 03)</p>
+              <hr>
+              <p><b>После C2</b></p>
+              <p>основное хранилище: шлюз ходит сюда вместо MinIO, чтения s3elma365 тоже через шлюз</p>
+              <p class="muted">журнал и обработчик работают обратно, новое S3 → MinIO, поэтому откат без потерь</p>
+              <hr>
+              <p><b>C1</b> <span class="muted">независимая сверка key + size + ETag обоих бакетов</span></p>
+            </div></foreignObject>
+          </g>
+        </svg>
+      </div>
+      <p class="fig-hint">Наведите курсор на компонент, чтобы подсветить его связи. Щелчок открывает описание ниже. Стрелки показывают, кто делает запрос.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-cards">
+    <h2 id="h-cards">Компоненты</h2>
+    <div class="cards">
+      <article class="card" id="c-nginx">
+        <div class="card-h"><h3><span class="dot d-svc"></span>nginx</h3><span class="tag t-src">вход</span></div>
+        <div class="where">deploy/nginx/s3gw.conf → /etc/nginx/conf.d/s3gw.conf</div>
+        <ul>
+          <li><code>10.10.0.12:9000</code> принимает весь трафик вместо MinIO; служебный порт <code>127.0.0.1:9080</code> для проверки (A3).</li>
+          <li>Выбор по методу: <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> к s3elma365 идут в MinIO, всё остальное к s3elma365 идёт в шлюз, другие бакеты всегда в MinIO.</li>
+          <li><code>proxy_next_upstream off</code>, запасного пути нет: шлюз лежит → <code>502</code>, журнал недоступен → <code>503</code>.</li>
+          <li>Host, путь и заголовки уходят как пришли, подписи SigV4 не ломаются; тела не буферизуются, тайм-аут 3600 с.</li>
+          <li>Лог только 5xx: <code>/var/log/nginx/s3gw-5xx.log</code>.</li>
+          <li>Откат до C2: <code>default s3gw_minio</code> и reload. После C2 чтения s3elma365 тоже идут в шлюз.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-gateway">
+        <div class="card-h"><h3><span class="dot d-p1"></span>s3gw-gateway</h3><span class="tag t-p1">процесс 1 · шлюз</span></div>
+        <div class="where">127.0.0.1:9100 · s3gw/gateway.py</div>
+        <ul>
+          <li>① Намерение: строка в <code>intents</code>, в <code>key_state</code> <code>change_seq + 1</code>, <code>in_flight + 1</code>, <code>state = dirty</code>. COMMIT с fsync до отправки в MinIO.</li>
+          <li>Не записалось за <code>GW_JOURNAL_TIMEOUT</code> = 2 с → <code>503 SlowDown</code>, в MinIO ничего не ушло.</li>
+          <li>② Запрос в MinIO байт в байт, тело потоком, плюс <code>X-S3gw-Request-Id</code> (присланный клиентом срезается).</li>
+          <li>③ Результат <code>success</code> / <code>error</code> / <code>uncertain</code>, снова <code>change_seq + 1</code>, <code>in_flight − 1</code>. Ответ MinIO клиенту без изменений.</li>
+          <li><code>DeleteObjects</code>: намерение на каждый ключ из тела, одной транзакцией.</li>
+          <li>Операции над бакетом → <code>501</code>. Другие бакеты → <code>GW_OTHER_UPSTREAM</code> без журнала.</li>
+          <li>Файл <code>read-only</code> → <code>503</code> на изменения (окно C2). Рестарт: новая эпоха, незакрытые намерения → <code>uncertain</code>.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-journal">
+        <div class="card-h"><h3><span class="dot d-db"></span>journal.db</h3><span class="tag t-db">общая база</span></div>
+        <div class="where">/var/lib/s3gw/journal.db · s3gw/journal.py</div>
+        <ul>
+          <li><code>intents</code>: каждое изменение: ключ, операция, результат, id запроса.</li>
+          <li><code>key_state</code>: состояние ключа, <code>change_seq</code> / <code>synced_seq</code>, <code>in_flight</code>, аренда, попытки, последняя ошибка.</li>
+          <li><code>mpu</code>: multipart-сессии. <code>gateway_epochs</code>: запуски шлюза. <code>errors</code>, <code>counters</code>.</li>
+          <li>Отставание: ключи в <code>dirty</code>, <code>uncertain</code>, <code>syncing</code>, <code>bulk</code>, у которых не <code>synced_seq = change_seq</code> и <code>in_flight = 0</code>.</li>
+          <li>Бэкап: <code>s3gw-journal-backup.timer</code> раз в час в <code>/backup/s3gw</code> через <code>VACUUM INTO</code>, хранятся 2 копии (A5).</li>
+          <li>Читать только <code>sqlite3 -readonly</code> от пользователя s3gw. Около 6 ГБ на 12 млн ключей вместе с bulk.db.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-handler">
+        <div class="card-h"><h3><span class="dot d-p1"></span>s3gw-handler</h3><span class="tag t-p1">процесс 1 · обработчик</span></div>
+        <div class="where">s3gw/handler.py · HANDLER_WORKERS=4 · GW_LEASE_SECONDS=900</div>
+        <ul>
+          <li>Берёт ключ <code>dirty</code> или <code>uncertain</code> с <code>in_flight = 0</code> и <code>not_before ≤ now</code>, ставит аренду и <code>syncing</code>, запоминает <code>change_seq</code>.</li>
+          <li>Один GET из MinIO: тело и метаданные одной версии. <code>NoSuchKey</code> → DELETE в новом S3.</li>
+          <li>Запись: до 16 МиБ одним PUT, крупнее multipart частями по 16 МиБ; Content-*, <code>x-amz-meta-*</code>, теги (запрос тегов только к объектам, у которых GET сообщил <code>TagCount</code>).</li>
+          <li>Проверка: тело сверяется с MD5 из ETag источника и уходит с <code>Content-MD5</code>, приёмник сам отвергнет порчу; затем HEAD сверяет размер.</li>
+          <li><code>change_seq</code> не изменился → <code>synced</code> / <code>deleted</code>; изменился → снова <code>dirty</code>.</li>
+          <li>Ошибки: повтор через 5 с с удвоением до 600 с, после 20 попыток <code>error</code>.</li>
+          <li>Без <code>DST_*</code> не стартует; включается на этапе B (B1). После C2 работает обратно, новое S3 → MinIO, с <code>journal-reverse.db</code>.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-bulk">
+        <div class="card-h"><h3><span class="dot d-p2"></span>s3gw-bulk</h3><span class="tag t-p2">процесс 2 · перенос</span></div>
+        <div class="where">python -m s3gw.bulk list | copy | run · s3gw/bulk.py</div>
+        <ul>
+          <li><b>list</b>: ListObjectsV2 по 256 диапазонам 00…ff прямо в <code>127.0.0.1:9000</code>, мимо nginx. Страница <code>LIST_PAGE_SIZE</code> = 1000, до <code>LIST_WORKERS</code> = 4 листеров. Следующие страницы идут по <code>ContinuationToken</code>, контрольная точка <code>StartAfter</code> сохраняется в одной транзакции со страницей.</li>
+          <li><b>copy</b>: <code>BULK_WORKERS</code> = 8. Ключ уже в <code>key_state</code> → <code>skipped_journal</code>. Иначе аренда <code>state = bulk</code>, копия тем же <code>copy_key</code>, что у обработчика.</li>
+          <li>После копии: ключ не менялся → <code>synced</code>; менялся → <code>dirty</code>, его доделает обработчик.</li>
+          <li>Лимит = минимум из <code>SCHEDULE</code> (днём 2 потока и 200 Мбит/с, ночью 8 и 800), ручных <code>pause</code> / <code>workers_max</code> / <code>mbps_max</code> и паузы при отставании журнала больше <code>JOURNAL_BACKLOG_MAX</code> = 10 000.</li>
+          <li><code>run</code> = list + copy; если листинг готов, сразу copy. Код 2: закончил с ошибками заданий; код 3: упал поток, systemd перезапустит через 30 с.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-bulkdb">
+        <div class="card-h"><h3><span class="dot d-db"></span>bulk.db</h3><span class="tag t-db">задания переноса</span></div>
+        <div class="where">/var/lib/s3gw/bulk.db · bulk-progress.jsonl</div>
+        <ul>
+          <li><code>ranges</code>: <code>pending → listing → listed</code>, после исчерпанных повторов <code>error</code>. Хранит контрольную точку и счётчики.</li>
+          <li><code>jobs</code>: <code>pending → claimed → done</code>, либо <code>skipped_journal</code> или <code>source_missing</code>; сбой → <code>retry</code>, после 10 попыток <code>error</code>.</li>
+          <li><code>control</code>: пауза и потолки без перезапуска (<code>$B pause</code>, <code>$B set workers_max 4</code>).</li>
+          <li>Отдельный файл, чтобы 12 млн вставок листинга не держали блокировку журнала шлюза.</li>
+          <li><code>bulk-progress.jsonl</code>: скорость, ETA, текущий лимит и его причина (<code>schedule</code>, <code>manual</code>, <code>paused</code>, <code>journal_lag</code>).</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-minio">
+        <div class="card-h"><h3><span class="dot d-src"></span>MinIO</h3><span class="tag t-src">источник</span></div>
+        <div class="where">127.0.0.1:9000 после A4 · /etc/default/minio</div>
+        <ul>
+          <li>Бакет s3elma365, около 12 млн объектов на 16 HDD. Перенос и обработчик читают объект одним GET; теги отдельным запросом — только если GET сообщил, что они есть.</li>
+          <li>После A4 слушает только loopback: снаружи писать мимо nginx и шлюза нельзя. Писать мимо шлюза могут только процессы на самом minio2.</li>
+          <li>Пользователь <code>s3gw-src</code> только на чтение s3elma365 (A1).</li>
+          <li>elma365-backups, -loki, -tempo в миграцию не входят и не зависят от шлюза.</li>
+          <li>После C2 в s3elma365 пишет только обратный обработчик; MinIO остаётся запасным источником для отката.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-news3">
+        <div class="card-h"><h3><span class="dot d-dst"></span>Новое S3</h3><span class="tag t-dst">приёмник</span></div>
+        <div class="where">DST_ENDPOINT · задача 03</div>
+        <ul>
+          <li>Бакет s3elma365; ключ <code>DST_*</code> с записью только в этот бакет.</li>
+          <li>Порт открыт только для minio2, поэтому писать в новое S3 можно только через шлюз и обработчик.</li>
+          <li>До переключения принимает ELMA365 с теми же ключами доступа: проверка подписи <code>check_new_s3_signature.py</code> (C0).</li>
+          <li>После C2 основное хранилище: шлюз ходит сюда, журнал и обработчик пишут изменения обратно в MinIO.</li>
+        </ul>
+      </article>
+
+      <article class="card" id="c-checks">
+        <div class="card-h"><h3><span class="dot d-svc"></span>Проверки</h3><span class="tag t-src">контроль полноты</span></div>
+        <div class="where">s3gw/tracecheck.py · s3gw/verifykeys.py · st5_reconcile_buckets.sh</div>
+        <ul>
+          <li><b>tracecheck</b> (A6): час <code>mc admin trace --verbose</code>. Норма <code>bypass_total = 0</code>, <code>missed_total = 0</code>. Первая чистая проверка разрешает листинг.</li>
+          <li><code>--mark-dirty</code>: ключи, изменённые мимо шлюза (например, во время отката), отдаются обработчику.</li>
+          <li><b>Сверка</b> (C1): заново листит оба бакета и сравнивает key + size и ETag (где с обеих сторон MD5), не опираясь ни на bulk.db, ни на журнал.</li>
+          <li><b>verifykeys</b> (C2, C4): проверяет ключи, изменённые после сверки или переключения. Норма <code>mismatched: 0</code>.</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-states">
+    <h2 id="h-states">Состояния ключа в key_state</h2>
+    <p class="section-note">Через эти состояния журнал и перенос делят ключи: кто первым создал строку, тот и владеет ключом.</p>
+    <div class="figure">
+      <div class="scroll-x">
+        <svg id="states" viewBox="0 0 1080 320" role="img" aria-label="Диаграмма состояний ключа">
+          <defs>
+            <marker id="s-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-ink" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="s-p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-p1" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="s-p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-p2" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="s-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-ok" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="s-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-bad" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="s-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="m-warn" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- edges -->
+          <path class="se se-p1" d="M155,160 H393" marker-end="url(#s-p1)"/>
+          <text class="sl sl-c" x="272" y="180">намерение шлюза</text>
+
+          <path class="se se-p2" d="M100,143 V70 H273" marker-end="url(#s-p2)"/>
+          <text class="sl" x="110" y="61">перенос: ключа ещё нет</text>
+
+          <path class="se se-ok" d="M330,53 V35 H990 V51" marker-end="url(#s-ok)"/>
+          <text class="sl sl-c" x="660" y="27">перенос: скопирован, ключ не менялся</text>
+
+          <path class="se se-p2" d="M362,87 L418,141" marker-end="url(#s-p2)"/>
+          <text class="sl" x="398" y="104">изменился во время копии</text>
+          <text class="sl" x="398" y="118">или аренда истекла</text>
+
+          <path class="se se-p1" d="M505,160 H623" marker-end="url(#s-p1)"/>
+          <text class="sl sl-c" x="564" y="151">аренда обработчика</text>
+
+          <path class="se se-ok" d="M735,152 L933,76" marker-end="url(#s-ok)"/>
+          <text class="sl sl-c" x="834" y="107" transform="rotate(-21 834 107)">записан и проверен</text>
+
+          <path class="se se-ok" d="M735,160 H933" marker-end="url(#s-ok)"/>
+          <text class="sl sl-c" x="834" y="152">NoSuchKey → удалён</text>
+
+          <path class="se se-bad" d="M735,168 L933,244" marker-end="url(#s-bad)"/>
+          <text class="sl sl-c" x="828" y="222" transform="rotate(21 828 222)">20 попыток</text>
+
+          <path class="se se-p1" d="M660,177 V215 H470 V179" marker-end="url(#s-p1)"/>
+          <text class="sl sl-c" x="565" y="232">временная ошибка: повтор через 5…600 с</text>
+          <text class="sl sl-c" x="565" y="246">или ключ изменился во время копии</text>
+
+          <path class="se se-warn" d="M178,290 H393" marker-end="url(#s-warn)"/>
+          <text class="sl" x="16" y="285">рестарт шлюза:</text>
+          <text class="sl" x="16" y="299">намерение без результата</text>
+
+          <path class="se se-warn" d="M505,290 H700 V179" marker-end="url(#s-warn)"/>
+          <text class="sl sl-c" x="600" y="282">через 900 с, как dirty</text>
+
+          <text class="sl sl-c" x="990" y="284">сброс вручную</text>
+          <text class="sl sl-c" x="990" y="298">или новым изменением</text>
+
+          <!-- states -->
+          <g class="st st-none"><rect x="45" y="143" width="110" height="34" rx="17"/><text x="100" y="160">нет строки</text></g>
+          <g class="st st-p2"><rect x="275" y="53" width="110" height="34" rx="17"/><text x="330" y="70">bulk</text></g>
+          <g class="st st-p1"><rect x="395" y="143" width="110" height="34" rx="17"/><text x="450" y="160">dirty</text></g>
+          <g class="st st-p1"><rect x="625" y="143" width="110" height="34" rx="17"/><text x="680" y="160">syncing</text></g>
+          <g class="st st-ok"><rect x="935" y="53" width="110" height="34" rx="17"/><text x="990" y="70">synced</text></g>
+          <g class="st st-ok"><rect x="935" y="143" width="110" height="34" rx="17"/><text x="990" y="160">deleted</text></g>
+          <g class="st st-bad"><rect x="935" y="233" width="110" height="34" rx="17"/><text x="990" y="250">error</text></g>
+          <g class="st st-warn"><rect x="395" y="273" width="110" height="34" rx="17"/><text x="450" y="290">uncertain</text></g>
+        </svg>
+      </div>
+      <p class="foot"><code>synced</code> и <code>deleted</code> не конечные: следующее намерение шлюза снова делает ключ <code>dirty</code>. Шлюз не смотрит на аренды и никого не ждёт. Ключ перенесён, когда <code>synced_seq = change_seq</code> и <code>in_flight = 0</code>.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-rules">
+    <h2 id="h-rules">Как процессы стыкуются</h2>
+    <ul class="rules">
+      <li><b>Ключ принадлежит тому, кто увидел его первым.</b><span>Перенос копирует ключ, только если его нет в <code>key_state</code>. Всё, что хоть раз прошло через шлюз, переносит обработчик, а перенос пропускает (<code>skipped_journal</code>).</span></li>
+      <li><b>Шлюз никого не ждёт.</b><span>Намерение пишется всегда, аренды обработчика и переноса на запись ELMA365 не влияют.</span></li>
+      <li><b>Изменённый во время копии ключ уходит обработчику.</b><span>Перенос видит <code>change_seq ≠ 0</code>, ставит <code>dirty</code>, и обработчик перечитывает текущую версию из MinIO.</span></li>
+      <li><b>Копирование уступает журналу.</b><span>Если обработчик отстаёт больше чем на <code>JOURNAL_BACKLOG_MAX</code> ключей, копирование встаёт на паузу (<code>journal_lag</code>). Листинг от журнала не зависит.</span></li>
+      <li><b>Инвентаризация начинается после включения шлюза.</b><span>Листинг запускают после первой чистой проверки трассировкой (A6), не раньше часа после A4. Всё, что в окне переключения записано мимо шлюза, уже лежит в MinIO и попадёт в листинг.</span></li>
+      <li><b>Отдельного прохода по изменённым ключам нет.</b><span>Всё, что менялось во время переноса, есть в журнале и закрывается обработчиком.</span></li>
+      <li><b>Без нового S3 работают только шлюз и листинг.</b><span>Обработчик и копирование без <code>DST_*</code> не стартуют, а журнал копит грязные ключи до появления приёмника.</span></li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="h-stages">
+    <h2 id="h-stages">Порядок запуска</h2>
+    <div class="stages">
+      <div class="col lanes">
+        <div class="st-head blank" aria-hidden="true"><b>·</b><span>·</span></div>
+        <div class="lane-name ln-p1"><b>Процесс 1</b>журнал</div>
+        <div class="lane-name ln-p2"><b>Процесс 2</b>перенос</div>
+      </div>
+      <div class="col">
+        <div class="st-head"><b>A · Журнал и инвентаризация</b><span>сейчас, нового S3 ещё нет</span></div>
+        <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
+          <li>A1–A3: пользователь MinIO только на чтение, шлюз, nginx на служебном порту, замер задержки.</li>
+          <li>A4: nginx встаёт на :9000, MinIO уходит на 127.0.0.1, изменения идут через шлюз.</li>
+          <li>A5 бэкап журнала, A6 трассировка: охват 100 %.</li>
+          <li>Обработчик выключен, грязные ключи копятся.</li>
+        </ul></div>
+        <div class="cell c-p2"><div class="lane-tag">Процесс 2 · перенос</div><ul>
+          <li>A7: <code>s3gw-bulk list</code> заполняет bulk.db, около 12 млн заданий.</li>
+          <li>Старт после первой чистой tracecheck, начать с одного листера.</li>
+          <li>Днём меньше потоков, ночью больше; <code>pause</code> / <code>resume</code>.</li>
+          <li>Копирования нет.</li>
+        </ul></div>
+      </div>
+      <div class="col">
+        <div class="st-head"><b>B · Обработчик и копирование</b><span>новое S3 развёрнуто (задача 03)</span></div>
+        <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
+          <li>B1: <code>DST_*</code> в s3gw.env, включается <code>s3gw-handler</code>.</li>
+          <li>Разбирает накопленное, отставание сходит до единиц ключей.</li>
+          <li>Дальше держит новое S3 актуальным до переключения ELMA365.</li>
+        </ul></div>
+        <div class="cell c-p2"><div class="lane-tag">Процесс 2 · перенос</div><ul>
+          <li>B2: согласовать <code>SCHEDULE</code> и порог деградации ELMA365.</li>
+          <li>B3: <code>systemctl start s3gw-bulk</code>, run сразу переходит к copy.</li>
+          <li>B4–B5: лимиты без перезапуска, <code>export-errors</code>, <code>retry-errors</code>.</li>
+          <li>B6: все диапазоны listed, нет pending, claimed, retry.</li>
+        </ul></div>
+      </div>
+      <div class="col">
+        <div class="st-head"><b>C · Проверка, переключение, откат</b><span>очередь переноса пуста</span></div>
+        <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
+          <li>C1: независимая сверка key + size + ETag обоих бакетов.</li>
+          <li>C2: read-only, очередь до нуля, verifykeys, шлюз и чтения на новое S3.</li>
+          <li>Журнал и обработчик работают обратно, новое S3 → MinIO.</li>
+          <li>C4 откат без потерь, C5 адрес minio2 переносится на новый сервер.</li>
+        </ul></div>
+        <div class="cell c-p2"><div class="lane-tag">Процесс 2 · перенос</div><ul>
+          <li>C2: <code>s3gw-bulk</code> остановлен и выключен.</li>
+          <li>Задания в <code>error</code> и <code>source_missing</code> остаются в отчёте.</li>
+          <li>Сверка C1 не опирается ни на bulk.db, ни на журнал.</li>
+        </ul></div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-fail">
+    <h2 id="h-fail">Что происходит при сбое</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Сбой</th><th>Что происходит</th><th>Что делать</th></tr></thead>
+        <tbody>
+          <tr><td>Шлюз упал или перезапущен</td><td>systemd поднимает его за секунду. Новая эпоха переводит незакрытые намерения в <code>uncertain</code>, обработчик сверит эти ключи с MinIO через 900 с.</td><td>Ничего.</td></tr>
+          <tr><td>Шлюз недоступен</td><td>Запись в s3elma365 получает <code>502</code>, ELMA365 её повторит. Чтения и другие бакеты работают.</td><td><code>systemctl status s3gw-gateway</code>, <code>s3gw-5xx.log</code>.</td></tr>
+          <tr><td>Журнал недоступен</td><td>Диск заполнен или блокировка дольше 2 с: запись получает <code>503</code>, в MinIO ничего не уходит.</td><td>Место на <code>/var/lib/s3gw</code>, таблица <code>errors</code>. Если быстро не чинится, откат в nginx с трассировкой и <code>--mark-dirty</code> (до C2).</td></tr>
+          <tr><td>Обработчик остановлен</td><td>Запись ELMA365 работает, растёт отставание. Копирование встаёт на паузу по <code>journal_lag</code>.</td><td>Запустить, очередь доработается из журнала.</td></tr>
+          <tr><td>Перенос остановлен</td><td>Ни на что не влияет.</td><td>Запустить, продолжит с контрольных точек.</td></tr>
+          <tr><td>nginx не отвечает</td><td>ELMA365 и другие сервисы теряют MinIO целиком, включая чтения. Мимо журнала ничего не пишется.</td><td><code>nginx -t</code>, <code>systemctl restart nginx</code>.</td></tr>
+          <tr><td>journal.db потерян или повреждён</td><td>Изменения с момента последней копии потеряны.</td><td>Восстановить из копии (A5). На этапе A начать инвентаризацию заново, на этапе B обязательна полная сверка.</td></tr>
+          <tr><td>Ключи в error</td><td>Попытки исчерпаны, ключ ждёт оператора и виден в отчёте.</td><td>Разобрать <code>last_error</code>, вернуть в <code>dirty</code> пачками по rowid.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <span>Собрано по <a href="https://github.com/laktes1/elma365_s3_migrator/blob/main/PIPELINE.md">PIPELINE.md</a>, <a href="https://github.com/laktes1/elma365_s3_migrator/blob/main/docs/gateway-design.md">docs/gateway-design.md</a>, <a href="https://github.com/laktes1/elma365_s3_migrator/blob/main/docs/bulk-transfer-design.md">docs/bulk-transfer-design.md</a> и <a href="https://github.com/laktes1/elma365_s3_migrator/blob/main/docs/nginx-routing.md">docs/nginx-routing.md</a>.</span>
+    <span>Пошаговые команды и проверки остаются в PIPELINE.md. Состояние на 22.10.2026.</span>
+  </footer>
+</main>
+
+<script>
+(function () {
+  var svg = document.getElementById('topo');
+  if (!svg) return;
+  var nodes = svg.querySelectorAll('.nd');
+  var edges = svg.querySelectorAll('.edge');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function focusNode(id) {
+    var linked = {};
+    linked[id] = true;
+    svg.classList.add('focusing');
+    edges.forEach(function (e) {
+      var ids = e.getAttribute('data-link').split(' ');
+      var on = ids.indexOf(id) !== -1;
+      e.classList.toggle('on', on);
+      if (on) ids.forEach(function (i) { linked[i] = true; });
+    });
+    nodes.forEach(function (n) { n.classList.toggle('on', !!linked[n.getAttribute('data-node')]); });
+  }
+  function clear() {
+    svg.classList.remove('focusing');
+    edges.forEach(function (e) { e.classList.remove('on'); });
+    nodes.forEach(function (n) { n.classList.remove('on'); });
+  }
+  function open(n) {
+    var card = document.getElementById(n.getAttribute('data-card') || '');
+    if (!card) return;
+    card.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    card.classList.remove('flash');
+    void card.offsetWidth;
+    card.classList.add('flash');
+  }
+  nodes.forEach(function (n) {
+    var id = n.getAttribute('data-node');
+    n.addEventListener('mouseenter', function () { focusNode(id); });
+    n.addEventListener('mouseleave', clear);
+    n.addEventListener('focus', function () { focusNode(id); });
+    n.addEventListener('blur', clear);
+    n.addEventListener('click', function () { open(n); });
+    n.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(n); }
+    });
+  });
+})();
+</script>

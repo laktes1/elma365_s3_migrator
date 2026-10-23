@@ -1,0 +1,9 @@
+[Unit]
+Description=s3gw: journal backup every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
