@@ -4,16 +4,20 @@
 After the cutover the gateway on minio2 forwards ELMA365 requests to the new S3 unchanged:
 Host elma.example.com, path-style /s3elma365/<key>, region ru-central-1, ELMA365's own keys.
 This script signs requests the same way, sends them straight to the new S3 and checks
-PUT, HEAD, GET, a presigned GET (X-Amz-SignedHeaders=host) and DELETE.
+PUT, HEAD, GET, a presigned GET (X-Amz-SignedHeaders=host) and DELETE. Last, a PUT whose body
+does not match its Content-MD5 must be refused: the copy (s3gw/copykey.py) sends Content-MD5 with
+every write and relies on the new S3 to check it (SeaweedFS does not check the signed payload hash).
 
 Usage (on minio2, ELMA365's access keys):
   ELMA_ACCESS_KEY=... ELMA_SECRET_KEY=... python3 scripts/check_new_s3_signature.py \
-      --endpoint http://NEW_S3_HOST:PORT --host elma.example.com --region ru-central-1
+      --endpoint https://NEW_S3_HOST:PORT --host elma.example.com --region ru-central-1
 Writes one object under _cutover-check/ and deletes it. Exit code 0 when every step passed.
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import os
 import sys
 import urllib.request
@@ -21,6 +25,7 @@ import uuid
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 
 def client(endpoint: str, host: str, region: str) -> object:
@@ -80,7 +85,19 @@ def main(argv: list | None = None) -> int:
     step("presigned GET", presigned_get)
 
     step("DELETE", lambda: cl.delete_object(Bucket=a.bucket, Key=key))
-    print("all passed" if ok else "some steps failed: the new S3 rejects ELMA365's requests as they will arrive")
+
+    def wrong_md5() -> None:
+        other = base64.b64encode(hashlib.md5(b"other").digest()).decode()
+        try:
+            cl.put_object(Bucket=a.bucket, Key=key, Body=body, ContentMD5=other)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            assert code == "BadDigest", f"refused with {code}, not BadDigest"
+            return
+        cl.delete_object(Bucket=a.bucket, Key=key)
+        raise AssertionError("a body that does not match Content-MD5 was stored: the copy's content check does not hold")
+    step("PUT with a wrong Content-MD5 refused (BadDigest)", wrong_md5)
+    print("all passed" if ok else "some steps failed (FAIL above): the new S3 is not ready for the cutover")
     return 0 if ok else 1
 
 

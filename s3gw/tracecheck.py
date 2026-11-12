@@ -15,7 +15,9 @@ no changes in the bucket, or some changes have no request headers (mc admin trac
 without --verbose).
 
 After a rollback of the routing (changes went straight to MinIO), --mark-dirty hands
-the keys changed past the gateway to the handler.
+the keys changed past the gateway to the handler, and the missed keys too: after the
+journal is restored from a copy (PIPELINE.md, A5) changes through the gateway since the
+copy show up as missed.
 """
 from __future__ import annotations
 
@@ -120,12 +122,18 @@ def check(lines: Iterable[str], intents: Dict[str, Set[str]], bucket: str) -> Di
     }
 
 
-def load_intents(journal_path: str) -> Dict[str, Set[str]]:
+def load_intents(journal_path: str, rids: Iterable[str]) -> Dict[str, Set[str]]:
+    """Keys journaled for the requests `rids`; only these, by idx_intents_request: the whole journal
+    took 443 MB of memory at 1M intents (scripts/bench_journal_scale.py)."""
+    want = sorted(set(rids))
     conn = sqlite3.connect(f"file:{journal_path}?mode=ro", uri=True)
     try:
         out: Dict[str, Set[str]] = {}
-        for rid, key in conn.execute("SELECT request_id, key FROM intents"):
-            out.setdefault(rid, set()).add(key)
+        for lo in range(0, len(want), 500):
+            chunk = want[lo:lo + 500]
+            for rid, key in conn.execute(
+                    f"SELECT request_id, key FROM intents WHERE request_id IN ({','.join('?' * len(chunk))})", chunk):
+                out.setdefault(rid, set()).add(key)
         return out
     finally:
         conn.close()
@@ -137,13 +145,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--journal", default=os.environ.get("JOURNAL_DB", "journal.db"))
     p.add_argument("--bucket", default=os.environ.get("GW_BUCKET", "s3elma365"))
     p.add_argument("--mark-dirty", action="store_true",
-                   help="hand the keys changed past the gateway to the handler (after a routing rollback)")
+                   help="hand the bypass and missed keys to the handler (after a routing rollback or a journal restore)")
     a = p.parse_args(argv)
-    intents = load_intents(a.journal)
+    with open(a.trace, encoding="utf-8", errors="replace") as fh:
+        intents = load_intents(a.journal, (ev["rid"] for ev in map(lambda line: parse_line(line, a.bucket), fh) if ev and ev["rid"]))
     with open(a.trace, encoding="utf-8", errors="replace") as fh:
         rep = check(fh, intents, a.bucket)
     if a.mark_dirty:
-        changed = sorted({e["key"] for e in rep["bypass"] if e["key"] and e["func"] not in NO_KEY_CHANGE})
+        changed = sorted({e["key"] for e in rep["bypass"] + rep["missed"] if e["key"] and e["func"] not in NO_KEY_CHANGE})
         wconn = journal.connect(Path(a.journal))
         rep["marked_dirty"] = journal.mark_dirty(wconn, changed)
         wconn.close()

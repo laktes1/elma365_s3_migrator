@@ -1,0 +1,13 @@
+# /etc/s3gw/s3gw-reverse.overrides, права 600, владелец s3gw (PIPELINE.md, C0.3).
+# Строки, которыми обратный конфиг s3gw-reverse.env отличается от s3gw.env: после переключения
+# шлюз ходит в новое S3, источник — новое S3, приёмник — MinIO, журнал свой. Остальное берётся из s3gw.env.
+GW_UPSTREAM=https://NEW_S3_HOST:PORT
+JOURNAL_DB=/var/lib/s3gw/journal-reverse.db
+# источник: новое S3, ключ только на чтение
+SRC_ENDPOINT=https://NEW_S3_HOST:PORT
+SRC_ACCESS_KEY=YOUR_NEW_S3_READ_KEY
+SRC_SECRET_KEY=YOUR_NEW_S3_READ_SECRET
+# приёмник: MinIO, пользователь s3gw-dst-minio из C0.2
+DST_ENDPOINT=http://127.0.0.1:9000
+DST_ACCESS_KEY=s3gw-dst-minio
+DST_SECRET_KEY=YOUR_SECRET2

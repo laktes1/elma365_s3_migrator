@@ -370,7 +370,7 @@ def build_app(cfg: GatewayConfig) -> web.Application:
 
 def main(argv: Optional[list] = None) -> int:
     p = argparse.ArgumentParser(description="S3 gateway with a durable intent journal")
-    p.add_argument("--listen", default=os.environ.get("GW_LISTEN", "127.0.0.1:9100"))
+    p.add_argument("--listen", default=os.environ.get("GW_LISTEN", "127.0.0.1:9110"))
     p.add_argument("--upstream", default=os.environ.get("GW_UPSTREAM", "http://127.0.0.1:9000"))
     # not --upstream by default: an env file without this line must not send other buckets to the new S3
     p.add_argument("--other-upstream", default=os.environ.get("GW_OTHER_UPSTREAM", "http://127.0.0.1:9000"),
@@ -385,6 +385,10 @@ def main(argv: Optional[list] = None) -> int:
                    help="seconds to wait for a durable intent before answering 503")
     p.add_argument("--upstream-timeout", type=float, default=float(os.environ.get("GW_UPSTREAM_TIMEOUT", "3600")),
                    help="socket read timeout towards MinIO, seconds")
+    # On SIGTERM aiohttp stops reading request bodies, so uploads in flight cannot finish; waiting longer only
+    # keeps the port closed (writes get 502 from nginx). Requests cut here are recovered by the next epoch.
+    p.add_argument("--shutdown-timeout", type=float, default=float(os.environ.get("GW_SHUTDOWN_TIMEOUT", "5")),
+                   help="seconds requests in flight get after SIGTERM before they are cut")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     host, _, port = a.listen.rpartition(":")
@@ -401,7 +405,7 @@ def main(argv: Optional[list] = None) -> int:
         readonly_file=Path(a.readonly_file) if a.readonly_file else None,
         other_upstream=a.other_upstream or None,
     )
-    web.run_app(build_app(cfg), host=host, port=int(port), access_log=None)
+    web.run_app(build_app(cfg), host=host, port=int(port), access_log=None, shutdown_timeout=a.shutdown_timeout)
     return 0
 
 

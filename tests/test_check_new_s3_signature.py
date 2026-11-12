@@ -1,6 +1,8 @@
 """The signature check sends and signs ELMA365's Host, not the endpoint address."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -29,7 +31,12 @@ def test_host_and_region_are_elma365s(monkeypatch) -> None:
 
         def do_PUT(self) -> None:  # noqa: N802
             self._seen()
-            store[self.path] = self.rfile.read(int(self.headers["Content-Length"]))
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            md5 = self.headers.get("Content-MD5")
+            if md5 and md5 != base64.b64encode(hashlib.md5(data).digest()).decode():
+                self._reply(400, b"<Error><Code>BadDigest</Code></Error>")
+                return
+            store[self.path] = data
             self._reply(200)
 
         def do_HEAD(self) -> None:  # noqa: N802
@@ -55,7 +62,8 @@ def test_host_and_region_are_elma365s(monkeypatch) -> None:
     finally:
         srv.shutdown()
     assert rc == 0
-    assert [m for m, *_ in seen] == ["PUT", "HEAD", "GET", "GET", "DELETE"]
+    methods = [m for m, *_ in seen]
+    assert methods[:5] == ["PUT", "HEAD", "GET", "GET", "DELETE"] and set(methods[5:]) == {"PUT"}  # the client may retry the refused PUT
     assert all(h == "elma.example.com" for _, h, _, _ in seen)
     signed = [a for _, _, a, _ in seen if a]
     assert signed and all("/ru-central-1/s3/aws4_request" in a and "host" in a for a in signed)

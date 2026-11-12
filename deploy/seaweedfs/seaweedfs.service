@@ -1,0 +1,26 @@
+# /etc/systemd/system/seaweedfs.service на ВМ нового S3 (docs/new-s3-install.md).
+# Один процесс: master, volume, filer и S3, как на стендах. Всё слушает только 127.0.0.1,
+# снаружи виден один nginx (deploy/nginx/new-s3.conf). Логи идут в journald (-logtostderr).
+# Встроенный IAM API, Iceberg (:8181) и Lance (:9101) в 4.48 включены по умолчанию, здесь выключены.
+[Unit]
+Description=SeaweedFS: new S3 for ELMA365
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/seaweedfs /var/lib/seaweedfs
+
+[Service]
+User=seaweedfs
+Group=seaweedfs
+WorkingDirectory=/var/lib/seaweedfs
+ExecStart=/usr/local/bin/weed -logtostderr server -ip=127.0.0.1 -ip.bind=127.0.0.1 \
+    -dir=/srv/seaweedfs/volumes -master.dir=/var/lib/seaweedfs/master -volume.max=0 \
+    -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -s3.iam=false -s3.port.iceberg=0 -s3.port.lance=0
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+LimitNOFILE=1048576
+# Бюджет ВМ 16 ГБ: при утечке systemd убьёт weed, а не sshd, и Restart поднимет его снова
+MemoryMax=13G
+
+[Install]
+WantedBy=multi-user.target

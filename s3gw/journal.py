@@ -360,8 +360,9 @@ def fail_sync(
         attempts = int(row["attempts"]) + 1
         state = "error" if attempts >= max_attempts else "dirty"
         delay = min(backoff_seconds * (2 ** (attempts - 1)), 600.0)
+        # MAX: a gateway restart during the attempt set not_before to the settle deadline (start_epoch)
         conn.execute(
-            """UPDATE key_state SET state = ?, attempts = ?, last_error = ?, not_before = ?,
+            """UPDATE key_state SET state = ?, attempts = ?, last_error = ?, not_before = MAX(not_before, ?),
                    lease_owner = NULL, lease_until = NULL, updated_at = ?
                WHERE key = ?""",
             (state, attempts, error[:2000], t + delay, now_iso(), lease.key),
@@ -417,24 +418,41 @@ def lease_remaining(lease: Lease, now: Optional[float] = None) -> float:
     return lease.until - (time.time() if now is None else now)
 
 
-def mark_dirty(conn: sqlite3.Connection, keys: Iterable[str]) -> int:
+def pause_after(started: float) -> None:
+    """Between batches of a long write: leave the write lock free as long as the batch held it.
+
+    SQLite's busy wait is not a queue: a waiter polls every 100 ms and loses to batches that
+    follow each other at once. Back to back, the batches of a purge held the gateway's journal
+    write past 2 s (scripts/bench_journal_scale.py).
+    """
+    time.sleep(time.monotonic() - started)
+
+
+def mark_dirty(conn: sqlite3.Connection, keys: Iterable[str], batch: int = 500) -> int:
     """Keys changed in MinIO past the gateway (e.g. while the redirect was rolled back):
-    the handler re-reads them, bulk copy no longer owns them. Same update as write_results."""
+    the handler re-reads them, bulk copy no longer owns them. Same update as write_results.
+
+    `batch` keys per transaction, with a pause after each: on a 12M journal 10 000 keys in one
+    held the write lock 1.3 s, close to the gateway's GW_JOURNAL_TIMEOUT (scripts/bench_journal_scale.py)."""
     ts = now_iso()
-    n = 0
-    with tx(conn):
-        for key in keys:
-            conn.execute(
-                """INSERT INTO key_state (key, change_seq, state, updated_at) VALUES (?, 1, 'dirty', ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                     change_seq = change_seq + 1,
-                     state = CASE WHEN state IN ('syncing', 'bulk') THEN state ELSE 'dirty' END,
-                     updated_at = excluded.updated_at""",
-                (key, ts),
-            )
-            n += 1
-        counter_inc(conn, "marked_dirty", n)
-    return n
+    todo = list(keys)
+    for lo in range(0, len(todo), batch):
+        chunk = todo[lo:lo + batch]
+        if lo:
+            pause_after(started)
+        started = time.monotonic()
+        with tx(conn):
+            for key in chunk:
+                conn.execute(
+                    """INSERT INTO key_state (key, change_seq, state, updated_at) VALUES (?, 1, 'dirty', ?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         change_seq = change_seq + 1,
+                         state = CASE WHEN state IN ('syncing', 'bulk') THEN state ELSE 'dirty' END,
+                         updated_at = excluded.updated_at""",
+                    (key, ts),
+                )
+            counter_inc(conn, "marked_dirty", len(chunk))
+    return len(todo)
 
 
 def backlog(conn: sqlite3.Connection) -> Tuple[int, Optional[str]]:
@@ -480,15 +498,18 @@ def live_epoch(conn: sqlite3.Connection) -> Optional[int]:
     return None if row is None or row[0] is None else int(row[0])
 
 
-def purge_intents(conn: sqlite3.Connection, older_than_days: float, batch: int = 10000) -> int:
+def purge_intents(conn: sqlite3.Connection, older_than_days: float, batch: int = 2000) -> int:
     """Delete closed intents older than the retention whose key is in sync.
 
     Open intents and intents of keys still waiting for the handler are kept:
-    they are the evidence the handler and recovery rely on.
+    they are the evidence the handler and recovery rely on. The first purge of
+    stage B deletes weeks of intents: in batches with a pause after each (a batch
+    of 10 000 held the write lock 0.3 s on a 12M journal, scripts/bench_journal_scale.py).
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     total = 0
     while True:
+        started = time.monotonic()
         with tx(conn):
             cur = conn.execute(
                 """DELETE FROM intents WHERE id IN (
@@ -502,3 +523,4 @@ def purge_intents(conn: sqlite3.Connection, older_than_days: float, batch: int =
         total += n
         if n < batch:
             return total
+        pause_after(started)

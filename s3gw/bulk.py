@@ -629,7 +629,7 @@ def _shares(span: float, d: Dict[str, float], workers: int) -> Optional[Dict[str
 
 
 def bottleneck(limits: "Limits", shares: Optional[Dict[str, float]], remaining: int) -> str:
-    """A hint for tuning (PIPELINE.md, B3), from the last 5 minutes."""
+    """A hint for tuning (PIPELINE.md, B1), from the last 5 minutes."""
     if limits.reason in ("paused", "journal_lag"):
         return limits.reason
     if limits.workers <= 0:
@@ -920,11 +920,12 @@ def export_errors(conn: sqlite3.Connection, out: Path, fmt: str = "jsonl") -> in
     return len(rows)
 
 
-def acquire_lock(bulk_path: Path) -> Any:
+def acquire_lock(bulk_path: Path, what: str = "bulk process") -> Any:
     """Exclusive lock for run/list/copy on one bulk.db; the OS drops it when the process dies.
 
     preflight() resets 'listing' ranges and all claims, which is right only
-    when no other bulk process works on the same database.
+    when no other bulk process works on the same database. The reconcile
+    (migrator/reconcile_buckets.py) takes the same lock on its state.db.
     """
     fh = open(str(bulk_path) + ".lock", "a+")
     try:
@@ -939,7 +940,7 @@ def acquire_lock(bulk_path: Path) -> Any:
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
         fh.close()
-        raise SystemExit(f"another bulk process is working on {bulk_path} (lock {bulk_path}.lock)")
+        raise SystemExit(f"another {what} is working on {bulk_path} (lock {bulk_path}.lock)")
     return fh
 
 

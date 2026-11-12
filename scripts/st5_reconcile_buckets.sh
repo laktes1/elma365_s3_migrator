@@ -18,6 +18,7 @@ Examples:
   bash scripts/st5_reconcile_buckets.sh
   WATERMARK=2026-11-20T18:00:00Z bash scripts/st5_reconcile_buckets.sh --phase verify
   ONLY_PREFIXES=00,01,__catch_all__ bash scripts/st5_reconcile_buckets.sh
+  RESUME=1 bash scripts/st5_reconcile_buckets.sh     # continue an interrupted run: finished partitions are kept
 EOF
 }
 
@@ -91,6 +92,7 @@ echo "  start_prefix:      ${START_PREFIX:-<none>}"
 echo "  stop_prefix:       ${STOP_PREFIX:-<none>}"
 echo "  only_prefixes:     ${ONLY_PREFIXES:-<none>}"
 echo "  watermark:         ${WATERMARK:-now-${WATERMARK_DELAY_MINUTES}m}"
+echo "  resume:            ${RESUME:-0}"
 echo ""
 
 CMD=(
@@ -122,5 +124,6 @@ CMD=(
   --only-prefixes "$ONLY_PREFIXES"
 )
 [[ -n "$WATERMARK" ]] && CMD+=(--watermark "$WATERMARK")
+[[ "${RESUME:-0}" = 1 ]] && CMD+=(--resume)
 
 "${CMD[@]}"

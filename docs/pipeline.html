@@ -381,7 +381,7 @@ footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border
           <g class="nd" data-node="gateway" data-card="c-gateway" tabindex="0" role="button" aria-label="s3gw-gateway, подробнее">
             <foreignObject x="420" y="210" width="230" height="160"><div class="box k-p1">
               <div class="bh"><b>s3gw-gateway</b><span class="tag t-p1">процесс 1</span></div>
-              <div class="mono muted">127.0.0.1:9100</div>
+              <div class="mono muted">127.0.0.1:9110</div>
               <ol>
                 <li>① намерение в журнал, fsync</li>
                 <li>② запрос в MinIO как есть</li>
@@ -482,7 +482,7 @@ footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border
 
       <article class="card" id="c-gateway">
         <div class="card-h"><h3><span class="dot d-p1"></span>s3gw-gateway</h3><span class="tag t-p1">процесс 1 · шлюз</span></div>
-        <div class="where">127.0.0.1:9100 · s3gw/gateway.py</div>
+        <div class="where">127.0.0.1:9110 · s3gw/gateway.py</div>
         <ul>
           <li>① Намерение: строка в <code>intents</code>, в <code>key_state</code> <code>change_seq + 1</code>, <code>in_flight + 1</code>, <code>state = dirty</code>. COMMIT с fsync до отправки в MinIO.</li>
           <li>Не записалось за <code>GW_JOURNAL_TIMEOUT</code> = 2 с → <code>503 SlowDown</code>, в MinIO ничего не ушло.</li>
@@ -570,8 +570,9 @@ footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border
 
       <article class="card" id="c-checks">
         <div class="card-h"><h3><span class="dot d-svc"></span>Проверки</h3><span class="tag t-src">контроль полноты</span></div>
-        <div class="where">s3gw/tracecheck.py · s3gw/verifykeys.py · st5_reconcile_buckets.sh</div>
+        <div class="where">s3gw/state.py · s3gw/tracecheck.py · s3gw/verifykeys.py · st5_reconcile_buckets.sh</div>
         <ul>
+          <li><b>state</b>: журнал одним JSON (эпоха, отставание, незакрытые и застрявшие намерения, ключи в error). <code>--wait-drained</code> ждёт пустую очередь в C1, C2 и C4.</li>
           <li><b>tracecheck</b> (A6): час <code>mc admin trace --verbose</code>. Норма <code>bypass_total = 0</code>, <code>missed_total = 0</code>. Первая чистая проверка разрешает листинг.</li>
           <li><code>--mark-dirty</code>: ключи, изменённые мимо шлюза (например, во время отката), отдаются обработчику.</li>
           <li><b>Сверка</b> (C1): заново листит оба бакета и сравнивает key + size и ETag (где с обеих сторон MD5), не опираясь ни на bulk.db, ни на журнал.</li>
@@ -677,35 +678,34 @@ footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border
         <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
           <li>A1–A3: пользователь MinIO только на чтение, шлюз, nginx на служебном порту, замер задержки.</li>
           <li>A4: nginx встаёт на :9000, MinIO уходит на 127.0.0.1, изменения идут через шлюз.</li>
-          <li>A5 бэкап журнала, A6 трассировка: охват 100 %.</li>
+          <li>Бэкап журнала включается вместе со шлюзом (A2, восстановление в A5); A6 трассировка: охват 100 %.</li>
           <li>Обработчик выключен, грязные ключи копятся.</li>
         </ul></div>
         <div class="cell c-p2"><div class="lane-tag">Процесс 2 · перенос</div><ul>
           <li>A7: <code>s3gw-bulk list</code> заполняет bulk.db, около 12 млн заданий.</li>
           <li>Старт после первой чистой tracecheck, начать с одного листера.</li>
           <li>Днём меньше потоков, ночью больше; <code>pause</code> / <code>resume</code>.</li>
-          <li>Копирования нет.</li>
+          <li>Копирования нет; по нагрузке листинга согласовать <code>SCHEDULE</code> копирования.</li>
         </ul></div>
       </div>
       <div class="col">
         <div class="st-head"><b>B · Обработчик и копирование</b><span>новое S3 развёрнуто (задача 03)</span></div>
         <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
-          <li>B1: <code>DST_*</code> в s3gw.env, включается <code>s3gw-handler</code>.</li>
+          <li>B1: <code>DST_*</code> в s3gw.env, обработчик и перенос стартуют одной командой.</li>
           <li>Разбирает накопленное, отставание сходит до единиц ключей.</li>
           <li>Дальше держит новое S3 актуальным до переключения ELMA365.</li>
         </ul></div>
         <div class="cell c-p2"><div class="lane-tag">Процесс 2 · перенос</div><ul>
-          <li>B2: согласовать <code>SCHEDULE</code> и порог деградации ELMA365.</li>
-          <li>B3: <code>systemctl start s3gw-bulk</code>, run сразу переходит к copy.</li>
-          <li>B4–B5: лимиты без перезапуска, <code>export-errors</code>, <code>retry-errors</code>.</li>
-          <li>B6: все диапазоны listed, нет pending, claimed, retry.</li>
+          <li>B1: run сразу переходит к copy, но ждёт (<code>journal_lag</code>), пока обработчик не разберёт накопленное.</li>
+          <li>B2–B3: лимиты без перезапуска, <code>export-errors</code>, <code>retry-errors</code>.</li>
+          <li>B4: все диапазоны listed, нет pending, claimed, retry.</li>
         </ul></div>
       </div>
       <div class="col">
         <div class="st-head"><b>C · Проверка, переключение, откат</b><span>очередь переноса пуста</span></div>
         <div class="cell c-p1"><div class="lane-tag">Процесс 1 · журнал</div><ul>
           <li>C1: независимая сверка key + size + ETag обоих бакетов.</li>
-          <li>C2: read-only, очередь до нуля, verifykeys, шлюз и чтения на новое S3.</li>
+          <li>C2: read-only, очередь до нуля, verifykeys, шлюз и чтения на новое S3 (<code>scripts/cutover.sh</code>).</li>
           <li>Журнал и обработчик работают обратно, новое S3 → MinIO.</li>
           <li>C4 откат без потерь, C5 адрес minio2 переносится на новый сервер.</li>
         </ul></div>
@@ -724,13 +724,13 @@ footer { color: var(--muted); font-size: 13.5px; display: grid; gap: 6px; border
       <table>
         <thead><tr><th>Сбой</th><th>Что происходит</th><th>Что делать</th></tr></thead>
         <tbody>
-          <tr><td>Шлюз упал или перезапущен</td><td>systemd поднимает его за секунду. Новая эпоха переводит незакрытые намерения в <code>uncertain</code>, обработчик сверит эти ключи с MinIO через 900 с.</td><td>Ничего.</td></tr>
+          <tr><td>Шлюз упал или перезапущен</td><td>После падения systemd поднимает его за секунду; <code>systemctl restart</code> обрывает загрузки в полёте и до 5 с (<code>GW_SHUTDOWN_TIMEOUT</code>) отвечает <code>502</code>. Новая эпоха переводит незакрытые намерения в <code>uncertain</code>, обработчик сверит эти ключи с MinIO через 900 с.</td><td>Ничего.</td></tr>
           <tr><td>Шлюз недоступен</td><td>Запись в s3elma365 получает <code>502</code>, ELMA365 её повторит. Чтения и другие бакеты работают.</td><td><code>systemctl status s3gw-gateway</code>, <code>s3gw-5xx.log</code>.</td></tr>
-          <tr><td>Журнал недоступен</td><td>Диск заполнен или блокировка дольше 2 с: запись получает <code>503</code>, в MinIO ничего не уходит.</td><td>Место на <code>/var/lib/s3gw</code>, таблица <code>errors</code>. Если быстро не чинится, откат в nginx с трассировкой и <code>--mark-dirty</code> (до C2).</td></tr>
+          <tr><td>Журнал недоступен</td><td>Диск заполнен или блокировка дольше 2 с: запись получает <code>503</code>, в MinIO ничего не уходит. Намерение, у которого не записался результат, остаётся открытым, и его ключ ждёт перезапуска шлюза.</td><td>Место на <code>/var/lib/s3gw</code>, таблица <code>errors</code>. Если быстро не чинится, откат в nginx с трассировкой и <code>--mark-dirty</code> (до C2). После починки: есть намерения без результата старше минуты — перезапустить шлюз.</td></tr>
           <tr><td>Обработчик остановлен</td><td>Запись ELMA365 работает, растёт отставание. Копирование встаёт на паузу по <code>journal_lag</code>.</td><td>Запустить, очередь доработается из журнала.</td></tr>
           <tr><td>Перенос остановлен</td><td>Ни на что не влияет.</td><td>Запустить, продолжит с контрольных точек.</td></tr>
           <tr><td>nginx не отвечает</td><td>ELMA365 и другие сервисы теряют MinIO целиком, включая чтения. Мимо журнала ничего не пишется.</td><td><code>nginx -t</code>, <code>systemctl restart nginx</code>.</td></tr>
-          <tr><td>journal.db потерян или повреждён</td><td>Изменения с момента последней копии потеряны.</td><td>Восстановить из копии (A5). На этапе A начать инвентаризацию заново, на этапе B обязательна полная сверка.</td></tr>
+          <tr><td>journal.db потерян или повреждён</td><td>Изменения с момента последней копии потеряны. Сверка не сравнивает теги: изменение только тегов, которое обработчик не успел перенести, останется старым.</td><td>Восстановить из копии (A5). На этапе A начать инвентаризацию заново, на этапе B обязательна полная сверка.</td></tr>
           <tr><td>Ключи в error</td><td>Попытки исчерпаны, ключ ждёт оператора и виден в отчёте.</td><td>Разобрать <code>last_error</code>, вернуть в <code>dirty</code> пачками по rowid.</td></tr>
         </tbody>
       </table>

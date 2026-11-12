@@ -98,6 +98,75 @@ def test_verify_queues_same_size_with_another_single_part_etag(tmp_path: Path, m
     assert (report["size_mismatch_count"], report["overall_ok"]) == (1, False)
 
 
+class _Flaky(_S3):
+    """Fails on the listed prefixes while `down`; remembers which prefixes it listed."""
+
+    def __init__(self, objects: dict[str, tuple[int, str]], down: set[str]) -> None:
+        super().__init__(objects)
+        self.down, self.listed = down, []
+
+    def paginate(self, Bucket: str, PaginationConfig: dict[str, int], Prefix: str = "", StartAfter: str = "") -> Iterator[dict[str, Any]]:
+        if Prefix in self.down:
+            raise RuntimeError("source down")
+        self.listed.append(Prefix)
+        return super().paginate(Bucket, PaginationConfig, Prefix, StartAfter)
+
+
+def _verify_args(db_path: Path, *extra: str) -> Any:
+    return mrb.build_parser().parse_args(
+        ["--src-alias", "a", "--src-bucket", "s", "--dst-alias", "b", "--dst-bucket", "d", "--state-db", str(db_path),
+         "--prefix-len", "2", "--only-prefixes", "00,01", "--list-workers", "1", *extra])
+
+
+def test_resume_lists_only_unfinished_partitions_with_the_first_watermark(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _Flaky({"00/a": (5, "aaa"), "01/b": (5, "bbb")}, down={"01"})
+    dst = _S3({"00/a": (5, "aaa")})
+    monkeypatch.setattr(mrb, "get_thread_s3_client", lambda side, _creds, _timeout: src if side == "src" else dst)
+    db_path = tmp_path / "state.db"
+    creds = ("http://x", "ak", "sk")
+    assert mrb.run_verify(_verify_args(db_path), object(), object(), creds, creds) == 2  # 01 in error: the run is cut short
+    conn = sqlite3.connect(str(db_path))
+    watermark = conn.execute("SELECT value FROM run_meta WHERE name = 'watermark'").fetchone()[0]
+    conn.close()
+
+    src.down, src.listed = set(), []
+    assert mrb.run_verify(_verify_args(db_path, "--resume"), object(), object(), creds, creds) == 2  # 01/b is really missing
+
+    assert src.listed == ["01"]  # 00 finished in the first run and is not listed again
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT prefix, status FROM partition_progress ORDER BY prefix").fetchall() == [("00", "done"), ("01", "done")]
+    assert conn.execute("SELECT key, action FROM reconcile_queue").fetchall() == [("01/b", "missing")]
+    assert conn.execute("SELECT value FROM run_meta WHERE name = 'watermark'").fetchone()[0] == watermark
+    conn.close()
+    report = json.loads((tmp_path / "reconcile_verify_report.json").read_text(encoding="utf-8"))
+    assert (report["missing_count"], report["partition_errors"]) == (1, 0)
+
+
+def test_second_run_on_the_same_state_db_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A --resume while the interrupted run is still alive (nohup kept it after an SSH drop) would break its partitions.
+    monkeypatch.setattr(mrb, "get_thread_s3_client", lambda *_a: _S3({}))
+    db_path = tmp_path / "state.db"
+    held = mrb.acquire_lock(db_path, "reconcile")
+    try:
+        with pytest.raises(SystemExit, match="another reconcile is working"):
+            mrb.run_verify(_verify_args(db_path, "--resume"), object(), object(), ("http://x", "ak", "sk"), ("http://x", "ak", "sk"))
+    finally:
+        held.close()
+
+
+def test_resume_refuses_another_watermark_or_no_earlier_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _S3({})
+    monkeypatch.setattr(mrb, "get_thread_s3_client", lambda *_a: store)
+    db_path = tmp_path / "state.db"
+    creds = ("http://x", "ak", "sk")
+    with pytest.raises(SystemExit, match="no earlier run"):
+        mrb.run_verify(_verify_args(db_path, "--resume"), object(), object(), creds, creds)
+    mrb.run_verify(_verify_args(db_path, "--watermark", "2026-11-20T18:00:00Z"), object(), object(), creds, creds)
+    with pytest.raises(SystemExit, match="used --watermark"):
+        mrb.run_verify(_verify_args(db_path, "--resume", "--watermark", "2026-11-20T19:00:00Z"), object(), object(), creds, creds)
+    assert mrb.run_verify(_verify_args(db_path, "--resume", "--watermark", "2026-11-20T18:00:00Z"), object(), object(), creds, creds) == 0
+
+
 @pytest.mark.parametrize(
     "prefix_len, gaps, outside_hex",
     [

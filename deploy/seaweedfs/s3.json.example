@@ -1,0 +1,12 @@
+{
+  "identities": [
+    {"name": "admin", "credentials": [{"accessKey": "ADMIN_KEY", "secretKey": "ADMIN_SECRET"}],
+     "actions": ["Admin", "Read", "Write", "List", "Tagging"]},
+    {"name": "elma365", "credentials": [{"accessKey": "ELMA365_KEY", "secretKey": "ELMA365_SECRET"}],
+     "actions": ["Read:s3elma365", "Write:s3elma365", "List:s3elma365", "Tagging:s3elma365"]},
+    {"name": "s3gw-dst", "credentials": [{"accessKey": "s3gw-dst", "secretKey": "S3GW_DST_SECRET"}],
+     "actions": ["Read:s3elma365", "Write:s3elma365", "List:s3elma365", "Tagging:s3elma365"]},
+    {"name": "s3gw-read", "credentials": [{"accessKey": "s3gw-read", "secretKey": "S3GW_READ_SECRET"}],
+     "actions": ["Read:s3elma365", "List:s3elma365", "Tagging:s3elma365"]}
+  ]
+}

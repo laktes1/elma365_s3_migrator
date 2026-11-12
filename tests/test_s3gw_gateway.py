@@ -88,10 +88,24 @@ def test_error_xml_message_is_escaped() -> None:
     assert "a&lt;b &amp; c" in xml[0]
 
 
-@pytest.mark.parametrize("listen", ["9100", ":9100", "host:port"])
+@pytest.mark.parametrize("listen", ["9110", ":9110", "host:port"])
 def test_listen_must_be_host_port(listen: str) -> None:
     with pytest.raises(SystemExit):
         gateway.main(["--listen", listen])
+
+
+@pytest.mark.parametrize("env, expected", [(None, 5.0), ("12", 12.0)])
+def test_shutdown_timeout_reaches_run_app(monkeypatch, env, expected) -> None:  # type: ignore[no-untyped-def]
+    # Default 5 s: after SIGTERM uploads in flight cannot finish anyway (stand_journal_recovery.py, block T).
+    if env is not None:
+        monkeypatch.setenv("GW_SHUTDOWN_TIMEOUT", env)
+    else:
+        monkeypatch.delenv("GW_SHUTDOWN_TIMEOUT", raising=False)
+    seen: Dict[str, Any] = {}
+    monkeypatch.setattr(gateway, "build_app", lambda cfg: None)
+    monkeypatch.setattr(gateway.web, "run_app", lambda app, **kw: seen.update(kw))
+    assert gateway.main([]) == 0
+    assert seen["shutdown_timeout"] == expected
 
 
 def test_forwarded_requests_carry_request_id_of_their_intents(tmp_path: Path) -> None:

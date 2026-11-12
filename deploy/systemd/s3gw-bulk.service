@@ -9,6 +9,6 @@ EnvironmentFile=/etc/s3gw/s3gw.env
 WorkingDirectory=/opt/elma365_s3_migrator
 ExecStart=/opt/elma365_s3_migrator/.venv/bin/python -m s3gw.bulk run
 Restart=on-failure
-# 2: finished with job or range errors, nothing to restart for (PIPELINE.md, B5)
+# 2: finished with job or range errors, nothing to restart for (PIPELINE.md, B3)
 RestartPreventExitStatus=2
 RestartSec=30

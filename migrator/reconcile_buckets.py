@@ -25,7 +25,7 @@ try:
     from migrator import common
 except ImportError:  # python3 migrator/reconcile_buckets.py
     import common  # type: ignore[no-redef]
-from s3gw.bulk import common_prefix, pred  # noqa: E402  common puts the repo root on sys.path
+from s3gw.bulk import acquire_lock, common_prefix, pred  # noqa: E402  common puts the repo root on sys.path
 
 
 SCHEMA_SQL = """
@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS dst_only (
   partition  TEXT,
   dst_size   INTEGER NOT NULL,
   seen_at    TEXT NOT NULL
+);
+
+-- Parameters of the run, so that --resume continues it with the same watermark and partitions.
+CREATE TABLE IF NOT EXISTS run_meta (
+  name   TEXT PRIMARY KEY,
+  value  TEXT NOT NULL
 );
 """
 
@@ -734,21 +740,58 @@ def run_verify(
     dst_creds: Credentials,
 ) -> int:
     db_path = Path(args.state_db).resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # A second run on the same state.db (a --resume while the interrupted one is still alive) would drop the
+    # listings of partitions the first one is comparing.
+    lock = acquire_lock(db_path, "reconcile")
+    try:
+        return _run_verify(args, db_path, src_client, dst_client, src_creds, dst_creds)
+    finally:
+        lock.close()
+
+
+def _run_verify(
+    args: argparse.Namespace,
+    db_path: Path,
+    src_client: Any,
+    dst_client: Any,
+    src_creds: Credentials,
+    dst_creds: Credentials,
+) -> int:
     conn = db_connect(db_path)
     try:
-        conn.execute("DELETE FROM partition_progress")
-        conn.execute("DELETE FROM reconcile_queue")
-        conn.execute("DELETE FROM dst_only")
+        if args.resume:
+            # An interrupted run goes on: partitions it finished are kept, the rest is listed again with its watermark.
+            meta = {r["name"]: r["value"] for r in conn.execute("SELECT name, value FROM run_meta")}
+            if "watermark" not in meta:
+                raise SystemExit(f"--resume: no earlier run in {db_path}")
+            if args.watermark and parse_utc(args.watermark) != parse_utc(meta["watermark"]):
+                raise SystemExit(f"--resume: the run used --watermark {meta['watermark']}, not {args.watermark}")
+            if int(meta["prefix_len"]) != args.prefix_len:
+                raise SystemExit(f"--resume: the run used --prefix-len {meta['prefix_len']}")
+            watermark = parse_utc(meta["watermark"])
+            undone = "SELECT prefix FROM partition_progress WHERE status != 'done'"
+            conn.execute(f"DELETE FROM reconcile_queue WHERE partition IN ({undone})")
+            conn.execute(f"DELETE FROM dst_only WHERE partition IN ({undone})")
+            done = {r["prefix"] for r in conn.execute("SELECT prefix FROM partition_progress WHERE status = 'done'")}
+        else:
+            watermark = parse_utc(args.watermark) if args.watermark else datetime.now(timezone.utc) - timedelta(minutes=args.watermark_delay_minutes)
+            for table in ("partition_progress", "reconcile_queue", "dst_only", "run_meta"):
+                conn.execute(f"DELETE FROM {table}")
+            conn.executemany("INSERT INTO run_meta(name, value) VALUES(?, ?)",
+                             [("watermark", watermark.isoformat()), ("prefix_len", str(args.prefix_len))])
+            done = set()
         conn.commit()
     finally:
         conn.close()
-    prefixes = filter_prefixes_for_run(
+    prefixes = [p for p in filter_prefixes_for_run(
         build_prefixes(args.prefix_len),
         start_prefix=args.start_prefix,
         stop_prefix=args.stop_prefix,
         only_prefixes=args.only_prefixes,
-    )
-    watermark = parse_utc(args.watermark) if args.watermark else datetime.now(timezone.utc) - timedelta(minutes=args.watermark_delay_minutes)
+    ) if p not in done]
+    if args.resume:
+        log(f"[verify] resume: {len(done)} partitions done, {len(prefixes)} to list, watermark {format_utc(watermark)}")
     scan_partitions(
         db_path=db_path,
         prefixes=prefixes,
@@ -818,6 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--src-s3-read-timeout", type=int, default=0, help="Source S3 read timeout. 0 inherits --s3-read-timeout.")
     p.add_argument("--dst-s3-read-timeout", type=int, default=0, help="Destination S3 read timeout. 0 inherits --s3-read-timeout.")
     p.add_argument("--watermark", default="", help="UTC ISO timestamp. Default: now - watermark delay.")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue an interrupted run of the same --state-db: finished partitions are kept, its watermark is used.")
     p.add_argument("--watermark-delay-minutes", type=int, default=10)
     p.add_argument("--start-prefix", default="", help="Start verify from this partition prefix, inclusive.")
     p.add_argument("--stop-prefix", default="", help="Stop verify at this partition prefix, inclusive.")

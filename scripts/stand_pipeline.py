@@ -346,7 +346,7 @@ class Traffic:
 # ---------------------------------------------------------------------------
 
 
-def compare_buckets(a: Any, b: Any, bucket: str, workers: int = 16) -> Dict[str, Any]:
+def compare_buckets(a: Any, b: Any, bucket: str, workers: int = 16, samples: int = 10) -> Dict[str, Any]:
     def listing(cl: Any) -> Dict[str, int]:
         out: Dict[str, int] = {}
         for page in cl.get_paginator("list_objects_v2").paginate(Bucket=bucket):
@@ -378,7 +378,7 @@ def compare_buckets(a: Any, b: Any, bucket: str, workers: int = 16) -> Dict[str,
             if res:
                 problems.append(res)
     return {"objects_a": len(la), "objects_b": len(lb), "missing_in_b": len(missing), "extra_in_b": len(extra),
-            "different": len(problems), "samples": {"missing": missing[:10], "extra": extra[:10], "different": problems[:10]}}
+            "different": len(problems), "samples": {"missing": missing[:samples], "extra": extra[:samples], "different": problems[:samples]}}
 
 
 def compare_main(argv: List[str]) -> int:
@@ -388,8 +388,10 @@ def compare_main(argv: List[str]) -> int:
     p.add_argument("--b", required=True)
     p.add_argument("--b-creds", required=True)
     p.add_argument("--bucket", default=BUCKET)
+    p.add_argument("--samples", type=int, default=10)
     a = p.parse_args(argv)
-    rep = compare_buckets(s3(a.a, tuple(a.a_creds.split(":"))), s3(a.b, tuple(a.b_creds.split(":"))), a.bucket)
+    rep = compare_buckets(s3(a.a, tuple(a.a_creds.split(":"))), s3(a.b, tuple(a.b_creds.split(":"))), a.bucket,
+                          samples=a.samples)
     print(json.dumps(rep, ensure_ascii=False))
     return 0
 
@@ -464,7 +466,7 @@ class Stand:
     def write_env(self, **over: str) -> None:
         env = {
             "JOURNAL_DB": f"{J}/journal.db", "BULK_DB": f"{J}/bulk.db", "PROGRESS_FILE": f"{J}/bulk-progress.jsonl",
-            "GW_LISTEN": "127.0.0.1:9100", "GW_UPSTREAM": "http://127.0.0.1:9000",
+            "GW_LISTEN": "127.0.0.1:9110", "GW_UPSTREAM": "http://127.0.0.1:9000",
             "GW_OTHER_UPSTREAM": "http://127.0.0.1:9000", "GW_BUCKET": BUCKET, "GW_SETTLE_SECONDS": "3",
             "GW_ALLOW_BUCKET_OPS": "", "GW_READONLY_FILE": f"{J}/read-only", "GW_JOURNAL_TIMEOUT": "2",
             "GW_UPSTREAM_TIMEOUT": "3600",
@@ -480,11 +482,15 @@ class Stand:
         text = "".join(f'{k}="{v}"\n' if re.search(r"[\s;]", v) else f"{k}={v}\n" for k, v in env.items() if v is not None)
         dx("cat > /etc/s3gw/s3gw.env && chmod 600 /etc/s3gw/s3gw.env", user="s3gw", input=text)
 
-    def save_env(self, name: str) -> None:
-        dx(f"cp -p /etc/s3gw/s3gw.env /etc/s3gw/{name}", user="s3gw")
+    def state(self, wait: Optional[float] = None) -> Dict[str, Any]:
+        """PIPELINE.md: $RUN s3gw.state [--wait-drained N], on the journal of the env file."""
+        r = s3gw("s3gw.state" + (f" --wait-drained {wait:.0f}" if wait is not None else ""), check=False, timeout=(wait or 0) + 120)
+        if not r.stdout.strip():
+            raise RuntimeError(f"s3gw.state printed nothing (exit {r.returncode}): {r.stderr.strip()[-500:]}")
+        return {**json.loads(r.stdout), "exit": r.returncode}
 
     def gateway_up(self) -> bool:
-        return dx_rc("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9100/minio/health/live").stdout == "200"
+        return dx_rc("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9110/minio/health/live").stdout == "200"
 
     def start_gateway(self, extra_env: str = "") -> None:
         start("gateway", "s3gw.gateway", extra_env)
@@ -501,9 +507,9 @@ class Stand:
     def bulk_status(self) -> Dict[str, Any]:
         return json.loads(s3gw(f"s3gw.bulk status --bulk-db {J}/bulk.db").stdout)
 
-    def compare(self, a: str, a_creds: tuple, b: str, b_creds: tuple) -> Dict[str, Any]:
+    def compare(self, a: str, a_creds: tuple, b: str, b_creds: tuple, samples: int = 10) -> Dict[str, Any]:
         out = dx(f"/opt/venv/bin/python /opt/stand_pipeline.py --compare --a {a} --a-creds {':'.join(a_creds)} "
-                 f"--b {b} --b-creds {':'.join(b_creds)}", timeout=1800)
+                 f"--b {b} --b-creds {':'.join(b_creds)} --samples {samples}", timeout=1800)
         return json.loads(out.strip().splitlines()[-1])
 
     def pipeline_block(self, start: str, end: str) -> str:
@@ -585,9 +591,9 @@ class Stand:
         # A2: gateway only
         self.write_env(DST_ENDPOINT=None)
         self.start_gateway()
-        ep = sql("SELECT epoch FROM gateway_epochs")
-        self.check("A2 gateway up, one epoch, journal owned by s3gw",
-                   len(ep) == 1 and "root" not in dx(f"ls -l {J}"), ep)
+        st = self.state()
+        self.check("A2 gateway up, s3gw.state: epoch 1, nothing waiting; journal owned by s3gw",
+                   st["epoch"]["epoch"] == 1 and st["drained"] and "root" not in dx(f"ls -l {J}"), st["epoch"])
         rc = s3gw("s3gw.handler --once", check=False)
         self.check("A2 handler refuses to start without DST_ENDPOINT", rc.returncode != 0 and "DST_ENDPOINT" in rc.stderr,
                    rc.stderr.strip().splitlines()[-1:] or rc.returncode)
@@ -702,10 +708,10 @@ class Stand:
                    {"put": st_put, "intents": rows})
         traffic.resume()
 
-        # A5: journal backup by the unit's script, as s3gw
+        # A2: the backup timer's script, as s3gw (A5 restores from its copies)
         r = dx_rc(f"JOURNAL_DB={J}/journal.db BACKUP_DIR=/backup/s3gw KEEP=2 sh /opt/elma365_s3_migrator/deploy/systemd/s3gw-journal-backup.sh "
                   f"&& sqlite3 $(ls -1t /backup/s3gw/journal-2*.db | head -1) 'PRAGMA integrity_check'", user="s3gw")
-        self.check("A5 journal backup made and intact", r.returncode == 0 and r.stdout.strip().endswith("ok"), r.stderr.strip()[-200:])
+        self.check("A2 journal backup made and intact", r.returncode == 0 and r.stdout.strip().endswith("ok"), r.stderr.strip()[-200:])
 
         # A6: coverage by trace, with one deliberate bypass from minio2 itself
         trace = self.trace_start("a6")
@@ -950,14 +956,37 @@ class Stand:
 
     def stage_b(self, traffic: Traffic) -> None:
         self.start_newstore()
-        # B1: handler with the destination, drains what stage A journaled
         self.env_b = {"DST_ENDPOINT": "http://newstore:8333", "DST_ACCESS_KEY": DST[0], "DST_SECRET_KEY": DST[1],
                       "JOURNAL_BACKLOG_MAX": "60"}
+
+        # Unreadable keys (a permission broken on purpose): two listed objects and one ELMA365 changes now.
+        poison = self.untouched_jobs("pending", 2)
+        for k in poison:
+            traffic.forget(k)
+        poison_h = "poison-h/" + str(uuid.uuid4())
+        self.deny("s3gw-src-poison", [{"Effect": "Deny", "Action": ["s3:GetObject"], "Resource":
+                   [f"arn:aws:s3:::{BUCKET}/{k}" for k in poison] + [f"arn:aws:s3:::{BUCKET}/poison-h/*"]}])
+        s3(f"http://127.0.0.1:{PORT}", ELMA, xff=True).put_object(Bucket=BUCKET, Key=poison_h, Body=b"handler cannot read me")
+        # a listed object deleted before its copy, past the gateway (the journal does not know): source_missing later
+        gone = self.untouched_jobs("pending", 3)[2]
+        traffic.forget(gone)
+        mc("rm", f"local/{BUCKET}/{gone}")
+
+        # B1: handler and copy by one command; the copy waits (journal_lag) while the handler drains stage A.
+        # Copy slowed so the failures below land mid-copy.
         self.write_env(**self.env_b)
+        s3gw(f"s3gw.bulk set mbps_max 4 --bulk-db {J}/bulk.db")
+        lines0 = int(dx(f"cat {J}/bulk-progress.jsonl 2>/dev/null | wc -l", user="s3gw").strip() or 0)
         b0 = self.backlog()
         start("handler", "s3gw.handler")
+        start("bulk1", "s3gw.bulk run")
+        first = wait(lambda: next((json.loads(line) for line in dx(f"tail -n +{lines0 + 1} {J}/bulk-progress.jsonl", user="s3gw")
+                                   .splitlines() if line.strip()), None), 60, "first report of the copy", every=1)
         wait(lambda: self.backlog() < 20, 900, "handler drains stage A backlog", every=2)
-        self.check("B1 handler drains the journal of stage A", b0 > 100, {"backlog_before": b0, "now": self.backlog()})
+        self.check("B1 handler and copy started together: the copy waits on journal_lag while the handler drains stage A",
+                   b0 > 100 and (first["limit_workers"], first["limit_reason"]) == (0, "journal_lag"),
+                   {"backlog_before": b0, "first_report": {k: first[k] for k in ("limit_workers", "limit_reason", "journal_backlog")},
+                    "now": self.backlog()})
 
         # tag removal reaches the new S3 (the traffic only sets tags)
         new = s3(f"http://127.0.0.1:{NEW_PORT}", DST)
@@ -974,28 +1003,12 @@ class Stand:
         left = tags()
         self.check("B tag removal through nginx reaches the new S3", not left, left)
 
-        # Unreadable keys (a permission broken on purpose): two listed objects and one ELMA365 changes now.
-        poison = self.untouched_jobs("pending", 2)
-        for k in poison:
-            traffic.forget(k)
-        poison_h = "poison-h/" + str(uuid.uuid4())
-        self.deny("s3gw-src-poison", [{"Effect": "Deny", "Action": ["s3:GetObject"], "Resource":
-                   [f"arn:aws:s3:::{BUCKET}/{k}" for k in poison] + [f"arn:aws:s3:::{BUCKET}/poison-h/*"]}])
-        s3(f"http://127.0.0.1:{PORT}", ELMA, xff=True).put_object(Bucket=BUCKET, Key=poison_h, Body=b"handler cannot read me")
-        # a listed object deleted before its copy, past the gateway (the journal does not know): source_missing later
-        gone = self.untouched_jobs("pending", 3)[2]
-        traffic.forget(gone)
-        mc("rm", f"local/{BUCKET}/{gone}")
-
-        # B3: copy by the ready listing, slowed so the failures land mid-copy
-        s3gw(f"s3gw.bulk set mbps_max 4 --bulk-db {J}/bulk.db")
-        start("bulk1", "s3gw.bulk run")
         wait(lambda: self.done() > 300, 300, "copy started", every=1)
-        self.check("B3 run goes straight to copy (listing ready), copiers make progress", self.done() > 300, self.done())
+        self.check("B1 run goes straight to copy (listing ready) once the backlog is below JOURNAL_BACKLOG_MAX", self.done() > 300, self.done())
         st = wait(lambda: (lambda s: s if s.get("copiers_last_5m") and s["rate"]["last_5m"]["copied_per_min"] else None)(
             json.loads(dx(f"cat {J}/bulk-status.json", user="s3gw"))), 60, "bulk-status.json with rates", every=2)
         self.results["bulk_status_while_copying"] = st
-        self.check("B3 bulk-status.json while copying: progress, rates, ETA, where the copiers' time goes, a bottleneck hint",
+        self.check("B1 bulk-status.json while copying: progress, rates, ETA, where the copiers' time goes, a bottleneck hint",
                    st["progress"]["jobs_total"] > 0 and st["eta"]["hours"] is not None
                    and st["bottleneck"] in ("mbps_limit", "source", "destination", "balanced", "idle")
                    and st["limits"] == {"workers": 4, "mbps": 4.0, "reason": "schedule"},
@@ -1023,11 +1036,11 @@ class Stand:
                    {"jobs_failed": retry_jobs, "handler_sync_fail": handler_fails, "error": errs})
         self.results["new_s3_restart_seconds"] = round(time.time() - down_for, 1)
 
-        # B4: pause / resume
+        # B2: pause / resume
         s3gw(f"s3gw.bulk pause --bulk-db {J}/bulk.db")
         paused = self.idle()
         s3gw(f"s3gw.bulk resume --bulk-db {J}/bulk.db")
-        self.check("B4 pause stops copying (claims handed back), resume continues", paused["idle"] and self.moving(), paused)
+        self.check("B2 pause stops copying (claims handed back), resume continues", paused["idle"] and self.moving(), paused)
 
         # journal lag: handler stopped -> backlog > JOURNAL_BACKLOG_MAX -> copy waits
         signal_proc("s3gw.handler", "TERM")
@@ -1037,7 +1050,7 @@ class Stand:
         lag_backlog = self.backlog()
         start("handler", "s3gw.handler")
         wait(lambda: self.backlog() < 30, 120, "handler catches up")
-        self.check("B2 copy waits on journal lag and resumes after the handler catches up",
+        self.check("B copy waits on journal lag mid-copy and resumes after the handler catches up",
                    lagged["idle"] and self.moving(), {**lagged, "backlog": lag_backlog})
 
         # SIGTERM, then the schedule from the env file, across a window boundary
@@ -1119,7 +1132,7 @@ class Stand:
         code = wait_exit("bulk3", 1200)
         stb = self.bulk_status()
         bad_jobs = {r["key"]: r for r in sql("SELECT key, attempts, last_error FROM jobs WHERE state = 'error'", "bulk.db")}
-        self.check("B5 unreadable objects: jobs in error after BULK_MAX_ATTEMPTS, the rest finished, exit 2",
+        self.check("B3 unreadable objects: jobs in error after BULK_MAX_ATTEMPTS, the rest finished, exit 2",
                    code == 2 and set(bulk_poison) <= set(bad_jobs)
                    and all(bad_jobs[k]["attempts"] == 5 and "AccessDenied" in bad_jobs[k]["last_error"] for k in bulk_poison)
                    and not any(stb["jobs"].get(s) for s in ("pending", "retry", "claimed")),
@@ -1133,7 +1146,7 @@ class Stand:
                    sorted(r["key"] for r in herr) == sorted([poison_h] + [k for k in poison if k in held])
                    and all(r["attempts"] == 4 for r in herr) and hrec >= 1, herr[:3])
 
-        # B5 repair as in PIPELINE.md: export, fix the cause, retry-errors, start again
+        # B3 repair as in PIPELINE.md: export, fix the cause, retry-errors, start again
         dx(f"cd /opt/elma365_s3_migrator && {PYM} s3gw.bulk export-errors --bulk-db {J}/bulk.db --out {J}/bulk-errors.jsonl", user="s3gw")
         exported = [json.loads(line) for line in dx(f"cat {J}/bulk-errors.jsonl", user="s3gw").splitlines() if line.strip()]
         self.undeny("s3gw-src-poison")
@@ -1142,7 +1155,7 @@ class Stand:
         code = wait_exit("bulk4", 600)
         stb = self.bulk_status()
         self.results["bulk_final"] = stb
-        self.check("B5 export-errors lists them; after retry-errors the next run copies them: exit 0, no job left",
+        self.check("B3 export-errors lists them; after retry-errors the next run copies them: exit 0, no job left",
                    {e["key"] for e in exported if e["kind"] == "job"} == set(bad_jobs) and int(retried) == len(bad_jobs) and code == 0
                    and not any(stb["jobs"].get(s) for s in ("pending", "retry", "claimed", "error"))
                    and all(one(f"SELECT state FROM jobs WHERE key = '{k}'", "bulk.db") == "done" for k in bulk_poison),
@@ -1196,19 +1209,18 @@ class Stand:
            "\"SELECT key FROM reconcile_queue UNION SELECT key FROM dst_only\" > /var/tmp/reconcile-keys.txt"
            " && chmod 644 /var/tmp/reconcile-keys.txt")
         nkeys = int(dx("wc -l < /var/tmp/reconcile-keys.txt").strip())
-        wait(lambda: self.backlog() == 0, 300, "handler backlog 0", every=1)
-        r = s3gw("s3gw.verifykeys --keys-file /var/tmp/reconcile-keys.txt", check=False)
-        found = {(m["key"], m["problem"]) for m in json.loads(r.stdout)["mismatches"]}
+        caught_up = self.state(wait=300)["drained"]
+        out = json.loads(s3gw("s3gw.verifykeys --keys-file /var/tmp/reconcile-keys.txt --mark-dirty", check=False).stdout)
+        found = {(m["key"], m["problem"]) for m in out["mismatches"]}
         self.results["c1_st5_live"] = {**v1, "keys_to_recheck": nkeys}
         self.check("C1 st5 verify on live traffic: discrepancies saved with their keys; the re-check leaves exactly the planted ones",
-                   v1["partition_errors"] == 0 and nkeys >= 3 and found == planted,
+                   caught_up and v1["partition_errors"] == 0 and nkeys >= 3 and found == planted,
                    {k: v1.get(k) for k in ("missing_count", "size_mismatch_count", "dst_only_count", "exit")} | {"recheck": sorted(found)})
-        r = s3gw("s3gw.verifykeys --keys-file /var/tmp/reconcile-keys.txt --mark-dirty", check=False)
-        marked = json.loads(r.stdout).get("marked_dirty")
-        wait(lambda: self.backlog() == 0, 300, "handler repairs the marked keys", every=1)
+        repaired = self.state(wait=300)["drained"]
         r = s3gw("s3gw.verifykeys --keys-file /var/tmp/reconcile-keys.txt", check=False)
-        self.check("C1 --mark-dirty hands them to the handler: re-check mismatched 0",
-                   marked == 3 and r.returncode == 0 and json.loads(r.stdout)["mismatched"] == 0, {"marked_dirty": marked})
+        self.check("C1 --mark-dirty hands them to the handler: after s3gw.state --wait-drained the re-check gives mismatched 0",
+                   out.get("marked_dirty") == 3 and repaired and r.returncode == 0 and json.loads(r.stdout)["mismatched"] == 0,
+                   {"marked_dirty": out.get("marked_dirty")})
         v2 = self.st5_verify(utc_now())
         self.results["c1_st5_quiet"] = v2
         self.check("C1 st5 verify with ELMA365 quiet: missing, size_mismatch, dst_only all 0, exit 0",
@@ -1229,7 +1241,23 @@ class Stand:
         mc("admin", "policy", "create", "local", "s3gw-dst-minio", "/w/rev.json")
         mc("admin", "user", "add", "local", REV[0], REV[1])
         mc("admin", "policy", "attach", "local", "s3gw-dst-minio", "--user", REV[0])
-        self.save_env("s3gw-forward-base.env")
+        # C0.3: the overrides example with this stand's values, then s3gw-reverse.env by the PIPELINE.md command, as root
+        vals = {"GW_UPSTREAM": new_ep, "JOURNAL_DB": f"{J}/journal-reverse.db", "SRC_ENDPOINT": new_ep, "SRC_ACCESS_KEY": NEWRO[0],
+                "SRC_SECRET_KEY": NEWRO[1], "DST_ENDPOINT": minio_ep, "DST_ACCESS_KEY": REV[0], "DST_SECRET_KEY": REV[1]}
+        example = (REPO / "deploy/systemd/s3gw-reverse.overrides.example").read_text(encoding="utf-8").splitlines()
+        setting = re.compile(r"^([A-Z_]+)=")
+        dx("cat > /etc/s3gw/s3gw-reverse.overrides && chmod 600 /etc/s3gw/s3gw-reverse.overrides", user="s3gw", input="".join(
+            f"{m.group(1)}={vals[m.group(1)]}\n" if (m := setting.match(line)) else line + "\n" for line in example))
+        r = dx_rc(self.pipeline_block("Собрать; повторять после каждой правки `s3gw.env` или `s3gw-reverse.overrides`:\n\n   ```bash\n", "```"))
+
+        def env_file(name: str) -> Dict[str, str]:
+            return dict(line.split("=", 1) for line in dx(f"cat /etc/s3gw/{name}").splitlines() if setting.match(line))
+
+        fwd, rev = env_file("s3gw.env"), env_file("s3gw-reverse.env")
+        owner = dx("stat -c '%U %a' /etc/s3gw/s3gw-reverse.env").strip()
+        self.check("C0.3 s3gw-reverse.env built by the PIPELINE.md command: s3gw.env with exactly the override lines replaced, s3gw 600",
+                   rev == {**fwd, **vals} and owner == "s3gw 600" and r.returncode == 1,  # 1: diff found the replaced lines
+                   {"changed": sorted(k for k in rev if rev[k] != fwd.get(k)), "owner": owner, "stderr": r.stderr.strip()[-200:]})
 
         # C2.1 write freeze
         dx(f"touch {J}/read-only")
@@ -1240,8 +1268,10 @@ class Stand:
         self.check("C2.1 read-only: writes 503, reads 200", st_put == "503" and st_get == "200", (st_put, st_get))
         traffic.pause()
         # C2.2 queue to zero
-        wait(lambda: self.backlog() == 0 and one("SELECT count(*) FROM intents WHERE result IS NULL") == 0, 300, "queue zero")
-        self.check("C2.2 queue zero, no open intents, no errors", not sql("SELECT key FROM key_state WHERE state = 'error'"))
+        st = self.state(wait=300)
+        self.check("C2.2 s3gw.state --wait-drained: queue zero, no open intents, no keys in error",
+                   st["exit"] == 0 and st["drained"] and st["error_keys"] == 0,
+                   {k: st[k] for k in ("drained", "backlog", "open_intents", "stuck_intents", "error_keys", "open_mpu")})
         # C2.3 verifykeys since the reconcile
         vk = s3gw(f"s3gw.verifykeys --journal {J}/journal.db --since {utc_minus(t_reconcile, 1)}", check=False)
         vko = json.loads(vk.stdout)
@@ -1250,13 +1280,13 @@ class Stand:
         # C2.4 switch the gateway to the new S3, reverse handler, reads through the gateway
         signal_proc("s3gw.handler", "TERM")
         wait_exit("handler", 60)
-        self.save_env("s3gw-forward.env")
-        self.write_env(GW_UPSTREAM=new_ep, JOURNAL_DB=f"{J}/journal-reverse.db", SRC_ENDPOINT=new_ep, SRC_ACCESS_KEY=NEWRO[0],
-                       SRC_SECRET_KEY=NEWRO[1], DST_ENDPOINT=minio_ep, DST_ACCESS_KEY=REV[0], DST_SECRET_KEY=REV[1])
-        self.save_env("s3gw-reverse.env")
+        dx("cp -p /etc/s3gw/s3gw.env /etc/s3gw/s3gw-forward.env && cp -p /etc/s3gw/s3gw-reverse.env /etc/s3gw/s3gw.env")
         self.stop_gateway()
         self.start_gateway()
         start("handler", "s3gw.handler")
+        st = self.state()
+        self.check("C2.4 s3gw.state now reads the fresh reverse journal: epoch 1",
+                   st["journal"] == f"{J}/journal-reverse.db" and st["epoch"]["epoch"] == 1, {"journal": st["journal"], "epoch": st["epoch"]})
         r = ngx("sed -i -E 's/^(    (GET|HEAD|OPTIONS) +)s3gw_minio;/\\1s3gw_gateway;/' /etc/nginx/conf.d/s3gw.conf && "
                 "grep -cE '^ +(GET|HEAD|OPTIONS) +s3gw_minio;' /etc/nginx/conf.d/s3gw.conf; nginx -t && nginx -s reload")
         self.check("C2.4 nginx: reads of s3elma365 now go to the gateway", r.stdout.strip().startswith("0") and r.returncode == 0,
@@ -1279,7 +1309,7 @@ class Stand:
         self.check("C2.5 after the cutover changes are journaled in journal-reverse.db, reads are not",
                    ops.get("put:success", 0) > 10 and not any(k.startswith("read:") for k in ops), ops)
         traffic.pause()
-        wait(lambda: self.backlog("journal-reverse.db") == 0, 300, "reverse backlog 0")
+        self.state(wait=300)  # C2.5: reverse backlog 0
         rep = self.compare(new_ep, DST, minio_ep, ROOT)
         self.results["c3_compare"] = rep
         self.check("C3 reverse handler keeps MinIO identical to the new S3", rep["missing_in_b"] == rep["extra_in_b"] == rep["different"] == 0,
@@ -1291,19 +1321,21 @@ class Stand:
         dx(f"touch {J}/read-only")
         time.sleep(2)
         traffic.pause()
-        wait(lambda: self.backlog("journal-reverse.db") == 0 and one("SELECT count(*) FROM intents WHERE result IS NULL", "journal-reverse.db") == 0,
-             300, "reverse queue zero")
+        st = self.state(wait=300)
+        self.check("C4.2 s3gw.state --wait-drained on the reverse journal: queue zero, no keys in error",
+                   st["exit"] == 0 and st["drained"] and st["error_keys"] == 0 and st["journal"] == f"{J}/journal-reverse.db",
+                   {k: st[k] for k in ("journal", "drained", "backlog", "open_intents", "error_keys")})
         vk = s3gw(f"s3gw.verifykeys --journal {J}/journal-reverse.db --since {utc_minus(t_cutover, 1)}", check=False)
         vko = json.loads(vk.stdout)
         self.check("C4.3 verifykeys of the reverse journal: mismatched 0", vk.returncode == 0 and vko["mismatched"] == 0 and vko["checked"] > 0,
                    {"checked": vko["checked"], "mismatched": vko["mismatched"]})
         signal_proc("s3gw.handler", "TERM")
         wait_exit("handler", 60)
+        ngx("sed -i -E 's/^(    (GET|HEAD|OPTIONS) +)s3gw_gateway;/\\1s3gw_minio;/' /etc/nginx/conf.d/s3gw.conf && nginx -t && nginx -s reload")
         dx("cp -p /etc/s3gw/s3gw-forward.env /etc/s3gw/s3gw.env && "
            f"sed -i 's#^JOURNAL_DB=.*#JOURNAL_DB={J}/journal-after-rollback.db#' /etc/s3gw/s3gw.env", user="s3gw")
         self.stop_gateway()
         self.start_gateway()
-        ngx("sed -i -E 's/^(    (GET|HEAD|OPTIONS) +)s3gw_gateway;/\\1s3gw_minio;/' /etc/nginx/conf.d/s3gw.conf && nginx -t && nginx -s reload")
         dx(f"rm {J}/read-only")
         time.sleep(1)
         st_after = try_op(lambda: elma.get_object(Bucket=BUCKET, Key=after)["Body"].read())

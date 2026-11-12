@@ -3,7 +3,7 @@
 
 Usage:
   SRC_ACCESS_KEY=... SRC_SECRET_KEY=... python3 scripts/bench_gateway_latency.py \
-      --direct http://127.0.0.1:9000 --gateway http://127.0.0.1:9100 --bucket s3elma365 --count 500
+      --direct http://127.0.0.1:9000 --gateway http://127.0.0.1:9110 --bucket s3elma365 --count 500
 Writes keys under the prefix bench-gw/<run id>/ and deletes them afterwards.
 """
 from __future__ import annotations

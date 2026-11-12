@@ -126,6 +126,19 @@ def test_recovery_marks_open_intents_uncertain(tmp_path: Path) -> None:
     assert [l.key for l in j.claim_dirty(conn, "h", 60, now=5101.0)] == ["k"]
 
 
+def test_failed_attempt_keeps_settle_of_recovery(tmp_path: Path) -> None:
+    # Handler holds k, a PUT of k is forwarded, the gateway dies, then the handler's attempt fails.
+    conn = _conn(tmp_path)
+    epoch = j.start_epoch(conn, 0)
+    _put(conn, epoch, "k")
+    lease = j.claim_dirty(conn, "h", 900, now=1000.0)[0]
+    j.write_intents(conn, epoch, "r", "put", ["k"])
+    j.start_epoch(conn, settle_seconds=900, now=1001.0)
+    assert j.fail_sync(conn, lease, "boom", backoff_seconds=5, max_attempts=20, now=1002.0) == "dirty"
+    assert j.claim_dirty(conn, "h", 900, now=1010.0) == []  # MinIO may still finish the operation
+    assert [l.key for l in j.claim_dirty(conn, "h", 900, now=1902.0)] == ["k"]
+
+
 def test_late_result_after_recovery_is_ignored(tmp_path: Path) -> None:
     conn = _conn(tmp_path)
     epoch = j.start_epoch(conn, 0)
@@ -180,6 +193,16 @@ def test_mark_dirty_hands_synced_and_bulk_keys_to_handler(tmp_path: Path) -> Non
     assert j.bulk_finish(conn, lease, source_missing=False) == "dirty"
     assert j.bulk_claim(conn, "new", "bulk-1", 60) is None  # bulk no longer owns it
     assert sorted(l.key for l in j.claim_dirty(conn, "h", 60, limit=10)) == ["copying", "new", "synced"]
+
+
+def test_mark_dirty_in_batches_marks_every_key_once(tmp_path: Path) -> None:
+    # Thousands of keys after a long rollback: short transactions, so the gateway's intents do not wait past their timeout.
+    conn = _conn(tmp_path)
+    keys = [f"k{i}" for i in range(7)]
+    assert j.mark_dirty(conn, iter(keys + keys[:2]), batch=3) == 9
+    assert conn.execute("SELECT value FROM counters WHERE name = 'marked_dirty'").fetchone()[0] == 9
+    rows = dict(conn.execute("SELECT key, change_seq FROM key_state WHERE state = 'dirty'").fetchall())
+    assert rows == {**{k: 1 for k in keys}, "k0": 2, "k1": 2}
 
 
 def test_work_queries_use_the_partial_index(tmp_path: Path) -> None:

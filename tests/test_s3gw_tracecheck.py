@@ -94,18 +94,21 @@ def test_trace_without_verbose_counts_changes_but_skips_reads() -> None:
     assert (rep["changes"], rep["without_headers"]) == (1, 1)
 
 
-def test_mark_dirty_writes_bypass_keys_to_journal(tmp_path: Path, capsys) -> None:
+def test_mark_dirty_writes_bypass_and_missed_keys_to_journal(tmp_path: Path, capsys) -> None:
     db = tmp_path / "journal.db"
     journal.connect(db).close()
     trace = tmp_path / "t.jsonl"
     trace.write_text("\n".join([
         _ev("s3.PutObject", "PUT", "/s3elma365/a b"),
         _ev("s3.PutObjectPart", "PUT", "/s3elma365/big"),
+        # through the gateway, intent only in a lost journal (restored from a copy, PIPELINE.md A5)
+        _ev("s3.PutObjectTagging", "PUT", "/s3elma365/tagged", "rid-lost"),
+        _ev("s3.DeleteMultipleObjects", "POST", "/s3elma365/", "rid-lost-batch"),  # keys unknown: C1 finds them
     ]), encoding="utf-8")
     assert tracecheck.main([str(trace), "--journal", str(db), "--mark-dirty"]) == 1
-    assert json.loads(capsys.readouterr().out)["marked_dirty"] == 1
+    assert json.loads(capsys.readouterr().out)["marked_dirty"] == 2
     conn = journal.connect(db)
-    assert [r["key"] for r in conn.execute("SELECT key FROM key_state WHERE state = 'dirty'")] == ["a b"]
+    assert [r["key"] for r in conn.execute("SELECT key FROM key_state WHERE state = 'dirty' ORDER BY key")] == ["a b", "tagged"]
 
 
 def test_utc_iso_matches_journal_format() -> None:

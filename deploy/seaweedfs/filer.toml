@@ -1,0 +1,6 @@
+# /etc/seaweedfs/filer.toml на ВМ нового S3 (docs/new-s3-install.md).
+# Метаданные filer (ключ, размер, ссылки на тома) — встроенный LevelDB на системном SSD ВМ.
+# Тома с данными лежат на RAID6 (-dir в seaweedfs.service).
+[leveldb2]
+enabled = true
+dir = "/var/lib/seaweedfs/filerldb2"
