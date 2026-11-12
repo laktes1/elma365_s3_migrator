@@ -452,6 +452,29 @@ journalctl -u s3gw-bulk -f
 
 Параллельно следить за задержками ELMA365. Раз в день записывать в «Решения» задачи 09 прогресс, ETA, изменения лимитов и повторяющиеся ошибки.
 
+### Ключи с диска вместо листинга MinIO
+
+Если и вторая страница листинга идёт десятки минут (на `minio2` 2026-11-12: первая страница 46 минут, `listed` дальше не растёт), MinIO на каждую страницу заново обходит каталог бакета, и листинг 12 млн ключей займёт месяцы. Тогда ключи читаются с дисков MinIO одним проходом ([scripts/keys_from_disk.sh](scripts/keys_from_disk.sh): `ls -f` каталога бакета на двух дисках набора, без `stat`) и загружаются в `bulk.db` командой `import-keys`. Только чтение, MinIO не останавливается. Список снимается после A4: ключ, созданный позже, есть в журнале, а удалённый позже станет `source_missing`.
+
+```bash
+systemctl stop s3gw-bulk      # листинг MinIO больше не нужен; копирование продолжит с того же bulk.db
+K=/var/lib/s3gw/keys-$(date +%F).txt
+systemd-run --unit=keys-from-disk bash /opt/elma365_s3_migrator/scripts/keys_from_disk.sh $K   /var/lib/minio/pool1/data1/minio/s3elma365 /var/lib/minio/pool1/data2/minio/s3elma365
+journalctl -u keys-from-disk -f -o cat        # «записей» по дискам, затем «ключей: N -> файл»
+```
+
+Число ключей должно быть близко к `stat -c %h` каталога бакета минус 2 (на `minio2` 12 240 616). Затем:
+
+```bash
+chown s3gw $K
+$B import-keys $K             # {"keys": ..., "added": ..., "already_known": ...}; минуты на 12 млн
+sudo -u s3gw sqlite3 -readonly /var/lib/s3gw/bulk.db "SELECT status, listed_count FROM ranges"   # listed
+systemctl start s3gw-bulk     # run: листинга нет, сразу копирование
+rm $K
+```
+
+Размер объекта до копирования неизвестен: у заданий `size` 0, после копирования в нём настоящий размер, поэтому `bytes.remaining` в статусе 0, а прогресс считается по объектам. Лимит Мбит/с учитывается после копирования каждого объекта.
+
 ## B2. Управление без перезапуска
 
 ```bash

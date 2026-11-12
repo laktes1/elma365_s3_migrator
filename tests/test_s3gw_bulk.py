@@ -534,3 +534,42 @@ def test_run_ends_when_fewer_workers_are_allowed_than_threads(tmp_path: Path) ->
     t.start()
     t.join(30)
     assert not t.is_alive() and dst.objects == objs
+
+
+def test_imported_keys_are_copied_without_listing_and_get_their_size(tmp_path: Path) -> None:
+    # import-keys (scripts/keys_from_disk.sh): jobs from a key list, every range 'listed', no ListObjectsV2;
+    # a key deleted after the list ends as source_missing, the copied size replaces the unknown 0.
+    import json
+
+    journal.start_epoch(journal.connect(tmp_path / "journal.db", synchronous="NORMAL"), 0)
+    objs = {f"{a}{b}-{i}": b"z" * (10 + i) for a in "0f" for b in "07" for i in range(3)}
+    class NoListing(_FullSource):
+        def list_objects_v2(self, **kw: Any) -> dict:
+            raise AssertionError("imported keys must not be listed")
+
+    src, dst = NoListing(objs), _Dst()
+    cfg = _cfg(tmp_path)
+    cfg.workers, cfg.report_every, cfg.range_bounds = 2, 0.2, []
+    cfg.status_path = tmp_path / "bulk-status.json"
+    conn = bulk.connect(cfg.bulk_path)
+    lines = [k + "\n" for k in sorted(objs)] + ["gone-after-the-list\n", "\n", sorted(objs)[0] + "\r\n"]
+    assert bulk.import_keys(conn, lines, cfg.range_bounds) == {"keys": len(objs) + 2, "added": len(objs) + 1,
+                                                               "already_known": 1}
+    assert [tuple(r) for r in conn.execute("SELECT status, listed_count FROM ranges")] == [("listed", len(objs) + 2)]
+    bulk.Runner(cfg, lambda: (src, dst)).run()
+    assert dst.objects == objs
+    sizes = dict(conn.execute("SELECT key, size FROM jobs WHERE state = 'done'").fetchall())
+    assert sizes == {k: len(v) for k, v in objs.items()}
+    assert conn.execute("SELECT state FROM jobs WHERE key = 'gone-after-the-list'").fetchone()[0] == "source_missing"
+    st = json.loads(cfg.status_path.read_text(encoding="utf-8"))
+    assert st["bytes"]["copied"] == sum(len(v) for v in objs.values()) and st["progress"]["listing_complete"]
+
+
+def test_import_keys_into_hex_ranges_and_refuses_a_non_key(tmp_path: Path) -> None:
+    conn = bulk.connect(tmp_path / "bulk.db")
+    assert bulk.import_keys(conn, ["0a\n", "ff-1\n", "AB\n"])["added"] == 3
+    rid = dict(conn.execute("SELECT key, range_id FROM jobs").fetchall())
+    lo = dict(conn.execute("SELECT id, lo FROM ranges").fetchall())
+    assert lo[rid["0a"]] == "0a" and lo[rid["ff-1"]] == "ff" and lo[rid["AB"]] == "9f"  # byte order: '9' < 'A' < 'a'
+    with pytest.raises(ValueError):
+        bulk.import_keys(conn, ["x" * 1025 + "\n"])

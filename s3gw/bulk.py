@@ -292,6 +292,58 @@ def list_range(
     return "stopped"
 
 
+def import_keys(conn: sqlite3.Connection, lines: Any, bounds: Optional[Sequence[str]] = None, batch: int = 10000) -> Dict[str, int]:
+    """Jobs from a key list instead of ListObjectsV2 (scripts/keys_from_disk.sh), then every range is 'listed'.
+
+    For a flat bucket MinIO walks the whole bucket directory for every listing page; the key names can be read
+    from the same directory on a MinIO disk once. The list must be taken after the gateway is in the write path
+    (PIPELINE.md, A4): a key created later is in the journal, a key deleted later ends as source_missing.
+    Sizes are not known: a job gets size 0 and its real size when it is copied.
+    """
+    init_ranges(conn, bounds)
+    ranges = conn.execute("SELECT id, lo FROM ranges ORDER BY id").fetchall()
+    los = sorted(((_key_bytes(r["lo"]), int(r["id"])) for r in ranges))
+    lo_keys = [lo for lo, _ in los]
+    import bisect
+
+    seen = added = 0
+    per_range: Dict[int, int] = {}
+    buf: List[Tuple[Any, ...]] = []
+
+    def flush() -> None:
+        nonlocal added
+        with journal.tx(conn):
+            cur = conn.executemany(  # rowcount: inserted jobs only (total_changes would count the job_counts triggers)
+                """INSERT OR IGNORE INTO jobs (key, range_id, size, etag, last_modified, state, updated_at)
+                   VALUES (?, ?, 0, NULL, NULL, 'pending', ?)""",
+                buf,
+            )
+            added += cur.rowcount
+        buf.clear()
+
+    for line in lines:
+        key = line.rstrip("\n").rstrip("\r")
+        if not key:
+            continue
+        kb = _key_bytes(key)
+        if len(kb) > MAX_KEY_BYTES:
+            raise ValueError(f"not an S3 key (over {MAX_KEY_BYTES} bytes): {key[:80]!r}")
+        rid = los[bisect.bisect_right(lo_keys, kb) - 1][1]
+        per_range[rid] = per_range.get(rid, 0) + 1
+        buf.append((key, rid, journal.now_iso()))
+        seen += 1
+        if len(buf) >= batch:
+            flush()
+    if buf:
+        flush()
+    with journal.tx(conn):
+        for rid, n in per_range.items():
+            conn.execute("UPDATE ranges SET listed_count = max(listed_count, ?) WHERE id = ?", (n, rid))
+        conn.execute("UPDATE ranges SET status = 'listed', finished_at = ?, last_error = NULL, updated_at = ?",
+                     (journal.now_iso(), journal.now_iso()))
+    return {"keys": seen, "added": added, "already_known": seen - added}
+
+
 def next_range(conn: sqlite3.Connection) -> Optional[int]:
     with journal.tx(conn):
         row = conn.execute("SELECT id FROM ranges WHERE status = 'pending' ORDER BY id LIMIT 1").fetchone()
@@ -476,12 +528,16 @@ def release_own_claims(conn: sqlite3.Connection, owner: str) -> int:
 
 
 def _set_job(conn: sqlite3.Connection, key: str, state: str, error: Optional[str] = None,
-             verify: Optional[str] = None, not_before: float = 0.0, bump: bool = False) -> None:
+             verify: Optional[str] = None, not_before: float = 0.0, bump: bool = False,
+             size: Optional[int] = None) -> None:
+    # size: the copied size, kept only for a job imported without one (size 0, import-keys); in the same UPDATE
+    # as the state, so the job_counts trigger moves the real bytes into the new state
     with journal.tx(conn):
         conn.execute(
             f"""UPDATE jobs SET state = ?, owner = NULL, claim_until = NULL, last_error = ?, verify = coalesce(?, verify),
-                   not_before = ?, attempts = attempts + {1 if bump else 0}, updated_at = ? WHERE key = ?""",
-            (state, error, verify, not_before, journal.now_iso(), key),
+                   not_before = ?, attempts = attempts + {1 if bump else 0}, updated_at = ?,
+                   size = CASE WHEN size = 0 AND ? IS NOT NULL THEN ? ELSE size END WHERE key = ?""",
+            (state, error, verify, not_before, journal.now_iso(), size, size, key),
         )
 
 
@@ -519,7 +575,7 @@ def copy_one(
     missing = outcome.status == SOURCE_MISSING
     journal.bulk_finish(jconn, lease, source_missing=missing)
     state = "source_missing" if missing else "done"
-    _set_job(bconn, key, state, verify=outcome.verify)
+    _set_job(bconn, key, state, verify=outcome.verify, size=outcome.size if not missing else None)
     return state
 
 
@@ -754,7 +810,11 @@ class Runner:
                         _set_job(bconn, job["key"], "retry")
                         continue
                     state = copy_one(bconn, jconn, job, owner, src, dst, self.cfg)
-                    self.stats.job(state, int(job["size"]))
+                    size = int(job["size"])
+                    if size == 0 and state == "done":  # imported key (import-keys): the size is known only now
+                        size = int(bconn.execute("SELECT size FROM jobs WHERE key = ?", (job["key"],)).fetchone()[0])
+                        self.controller.take_bytes(size, self.stop)  # the Mbit/s limit, charged after the copy
+                    self.stats.job(state, size)
                     if state in ("retry", "error"):
                         err = bconn.execute("SELECT last_error FROM jobs WHERE key = ?", (job["key"],)).fetchone()
                         self.stats.last_error = {"time": journal.now_iso(), "key": job["key"], "state": state,
@@ -961,7 +1021,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     from .handler import clients_from_env
 
     p = argparse.ArgumentParser(description="Bulk transfer of keys not seen by the gateway journal")
-    p.add_argument("command", choices=["run", "list", "copy", "status", "pause", "resume", "set", "retry-errors", "export-errors"])
+    p.add_argument("command", choices=["run", "list", "copy", "status", "pause", "resume", "set", "retry-errors", "export-errors",
+                                       "import-keys"])
     p.add_argument("args", nargs="*")
     p.add_argument("--bulk-db", default=os.environ.get("BULK_DB", "bulk.db"))
     p.add_argument("--journal", default=os.environ.get("JOURNAL_DB", "journal.db"))
@@ -1042,6 +1103,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.command in ("run", "copy") and cfg.lease_seconds <= need:
         p.error(f"--lease-seconds (GW_LEASE_SECONDS) must be above {need:.0f} s: a write starts only with that much lease left")
     lock = acquire_lock(Path(a.bulk_db))
+    if a.command == "import-keys":  # needs the lock: no bulk run may be listing into the same bulk.db
+        if len(a.args) != 1:
+            p.error("import-keys needs FILE: one key per line (scripts/keys_from_disk.sh), '-' for stdin")
+        conn = connect(Path(a.bulk_db))
+        try:
+            fh = sys.stdin if a.args[0] == "-" else open(a.args[0], encoding="utf-8", newline="\n")
+            with fh:
+                print(json.dumps(import_keys(conn, fh, cfg.range_bounds)))
+        finally:
+            conn.close()
+            lock.close()
+        return 0
     runner = Runner(cfg, clients_from_env(), clients_from_env(src_read_timeout=a.list_read_timeout))
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: runner.stop.set())
