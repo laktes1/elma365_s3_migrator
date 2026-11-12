@@ -15,3 +15,6 @@ scripts/.env*
 
 # Inputs and reports of specific runs (ids.txt, doc_files.xlsx, ...)
 run/
+
+# Local virtualenv
+.venv/

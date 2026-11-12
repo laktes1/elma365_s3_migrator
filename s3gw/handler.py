@@ -124,7 +124,7 @@ def run(cfg: HandlerConfig, make_clients: Callable[[], tuple], once: bool = Fals
     return sum(results)
 
 
-def _make_client(endpoint: str, access_key: str, secret_key: str, region: str) -> Any:
+def _make_client(endpoint: str, access_key: str, secret_key: str, region: str, read_timeout: float = 300) -> Any:
     import boto3
     from botocore.config import Config as BotoConfig
 
@@ -137,7 +137,7 @@ def _make_client(endpoint: str, access_key: str, secret_key: str, region: str) -
         config=BotoConfig(
             s3={"addressing_style": "path"},
             retries={"max_attempts": 1, "mode": "standard"},
-            read_timeout=300,
+            read_timeout=read_timeout,
             connect_timeout=10,
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
@@ -145,10 +145,12 @@ def _make_client(endpoint: str, access_key: str, secret_key: str, region: str) -
     )
 
 
-def clients_from_env() -> Callable[[], tuple]:
+def clients_from_env(src_read_timeout: float = 300) -> Callable[[], tuple]:
+    """src_read_timeout: the bulk lister's is LIST_READ_TIMEOUT (a page of a flat 12M-key bucket can take hours)."""
     def make() -> tuple:
         region = os.environ.get("S3_REGION", "us-east-1")
-        src = _make_client(os.environ["SRC_ENDPOINT"], os.environ["SRC_ACCESS_KEY"], os.environ["SRC_SECRET_KEY"], region)
+        src = _make_client(os.environ["SRC_ENDPOINT"], os.environ["SRC_ACCESS_KEY"], os.environ["SRC_SECRET_KEY"], region,
+                           read_timeout=src_read_timeout)
         if not os.environ.get("DST_ENDPOINT"):
             return src, None  # no destination yet: only `bulk list` runs (PIPELINE.md, stage A)
         dst = _make_client(os.environ["DST_ENDPOINT"], os.environ["DST_ACCESS_KEY"], os.environ["DST_SECRET_KEY"], region)

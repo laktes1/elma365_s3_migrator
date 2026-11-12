@@ -430,6 +430,9 @@ class BulkConfig:
     progress_path: Optional[Path] = None
     status_path: Optional[Path] = None  # current state, rewritten every STATUS_EVERY seconds
     require_gateway: bool = True
+    # None: 256 hex ranges. []: the whole bucket as one range (LIST_RANGES=one): MinIO walks a flat bucket
+    # directory once per range, so for 12M keys at the top level one walk beats 256 (docs/bulk-transfer-design.md)
+    range_bounds: Optional[List[str]] = None
 
 
 def claim_jobs(conn: sqlite3.Connection, owner: str, n: int, claim_seconds: float, now: Optional[float] = None) -> List[sqlite3.Row]:
@@ -664,9 +667,11 @@ def _duration(seconds: float) -> str:
 
 
 class Runner:
-    def __init__(self, cfg: BulkConfig, make_clients: Callable[[], tuple]) -> None:
+    def __init__(self, cfg: BulkConfig, make_clients: Callable[[], tuple],
+                 make_list_clients: Optional[Callable[[], tuple]] = None) -> None:
         self.cfg = cfg
         self.make_clients = make_clients
+        self.make_list_clients = make_list_clients or make_clients  # the listers' source: its own read timeout
         self.stop = threading.Event()
         self.controller = Controller(cfg.bulk_path, cfg.journal_path, cfg.schedule, cfg.tz, cfg.workers, cfg.backlog_max)
         self.listing_done = threading.Event()
@@ -695,14 +700,14 @@ class Runner:
         if do_copy:
             dst.head_bucket(Bucket=self.cfg.copy.dst_bucket)
         bconn = connect(self.cfg.bulk_path)
-        init_ranges(bconn)
+        init_ranges(bconn, self.cfg.range_bounds)  # only into an empty bulk.db: ranges never change mid-run
         bconn.execute("UPDATE ranges SET status = 'pending' WHERE status = 'listing'")
         release_stale_claims(bconn, now=float("inf"))
         bconn.close()
 
     def _lister(self, idx: int) -> None:
         conn = connect(self.cfg.bulk_path)
-        src, _ = self.make_clients()
+        src, _ = self.make_list_clients()
         src = _Timed(src, lambda s: self.stats.add(list_seconds=s))
         try:
             while not self.stop.is_set():
@@ -965,6 +970,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--workers", type=int, default=int(os.environ.get("BULK_WORKERS", "8")))
     p.add_argument("--list-workers", type=int, default=int(os.environ.get("LIST_WORKERS", "4")))
     p.add_argument("--page-size", type=int, default=int(os.environ.get("LIST_PAGE_SIZE", "1000")))
+    p.add_argument("--list-ranges", choices=["hex", "one"], default=os.environ.get("LIST_RANGES", "hex"),
+                   help="hex: 256 ranges by the first two hex characters; one: the whole bucket as one range. "
+                        "Read only when bulk.db is created")
+    p.add_argument("--list-read-timeout", type=float, default=float(os.environ.get("LIST_READ_TIMEOUT", "300")),
+                   help="seconds to wait for a listing page of the source")
     p.add_argument("--schedule", default=os.environ.get("SCHEDULE", ""))
     p.add_argument("--tz", default=os.environ.get("SCHEDULE_TZ", "Europe/Moscow"))
     p.add_argument("--backlog-max", type=int, default=int(os.environ.get("JOURNAL_BACKLOG_MAX", "0")))
@@ -1019,6 +1029,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_attempts=a.max_attempts,
         progress_path=Path(a.progress) if a.progress else None,
         status_path=Path(a.status_file) if a.status_file else Path(a.bulk_db).with_name("bulk-status.json"),
+        range_bounds=[] if a.list_ranges == "one" else None,
     )
     if cfg.schedule:
         try:
@@ -1031,7 +1042,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.command in ("run", "copy") and cfg.lease_seconds <= need:
         p.error(f"--lease-seconds (GW_LEASE_SECONDS) must be above {need:.0f} s: a write starts only with that much lease left")
     lock = acquire_lock(Path(a.bulk_db))
-    runner = Runner(cfg, clients_from_env())
+    runner = Runner(cfg, clients_from_env(), clients_from_env(src_read_timeout=a.list_read_timeout))
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: runner.stop.set())
         signal.signal(signal.SIGINT, lambda *_: runner.stop.set())

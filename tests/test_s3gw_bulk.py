@@ -234,6 +234,22 @@ def test_list_only_runs_without_destination_and_ignores_backlog(tmp_path: Path) 
     assert rep["ranges"] == {"listed": 256}
 
 
+def test_one_range_lists_the_whole_bucket_with_the_list_clients(tmp_path: Path) -> None:
+    # LIST_RANGES=one: a flat bucket is walked once, not 256 times; the listers use their own clients
+    # (LIST_READ_TIMEOUT), the copiers keep the usual ones.
+    jconn = journal.connect(tmp_path / "journal.db", synchronous="NORMAL")
+    journal.start_epoch(jconn, 0)
+    cfg = _cfg(tmp_path)
+    cfg.report_every, cfg.list_workers, cfg.range_bounds, cfg.page_size = 0.1, 1, [], 5
+    lister_src, other_src = ListOnlySource(KEYS), ListOnlySource([])
+    rep = bulk.Runner(cfg, lambda: (other_src, None), lambda: (lister_src, None)).run(do_list=True, do_copy=False)
+    assert rep["ranges"] == {"listed": 1}
+    assert rep["listed_objects"] == len(set(KEYS))
+    assert not other_src.calls
+    assert all(c["Prefix"] == "" for c in lister_src.calls)
+    assert all(c["ContinuationToken"] for c in lister_src.calls[1:])  # one walk: every later page by token
+
+
 def test_listing_waits_while_paused(tmp_path: Path) -> None:
     runner = _list_only_runner(tmp_path, ["0a", "ff"])
     bulk.set_control(bulk.connect(tmp_path / "bulk.db"), "paused", "1")
@@ -368,7 +384,7 @@ def test_short_lease_is_refused_for_copy_not_for_list(tmp_path: Path, monkeypatc
     assert not (tmp_path / "bulk.db.lock").exists()  # refused before taking the lock
     started: List[str] = []
     monkeypatch.setattr(bulk.Runner, "run", lambda self, **kw: started.append("run") or {"jobs": {}, "ranges": {}})
-    monkeypatch.setattr("s3gw.handler.clients_from_env", lambda: (lambda: (None, None)))
+    monkeypatch.setattr("s3gw.handler.clients_from_env", lambda **kw: (lambda: (None, None)))
     assert bulk.main(["list", "--bulk-db", str(tmp_path / "bulk.db"), "--journal", str(tmp_path / "j.db"),
                       "--lease-seconds", "20"]) == 0
     assert started == ["run"]

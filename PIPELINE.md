@@ -401,7 +401,7 @@ mkdir -p /var/lib/s3gw/old && mv /var/lib/s3gw/bulk.db* /var/lib/s3gw/old/
 
 ## B1. Запуск обработчика и копирования
 
-Листинг из A7 должен быть закончен или остановлен (`systemctl is-active s3gw-list` даёт `inactive`): второй процесс `bulk` на том же `bulk.db` не стартует. Раскомментировать `DST_*` в `/etc/s3gw/s3gw.env` (ключ с записью только в один бакет нового S3); `SCHEDULE` согласован в конце A7. Затем:
+Листинг из A7 должен быть закончен или остановлен (`systemctl is-active s3gw-list` даёт `inactive`): второй процесс `bulk` на том же `bulk.db` не стартует. Раскомментировать `DST_*` в `/etc/s3gw/s3gw.env` (ключ с записью только в один бакет нового S3); `SCHEDULE` согласован в конце A7. Если все ключи лежат в корне бакета (как на `minio2`: 12 млн, первая страница листинга дольше 15 минут), до первого запуска в `s3gw.env` должны стоять `LIST_RANGES=one`, `LIST_WORKERS=1`, `LIST_READ_TIMEOUT=14400` (как в `s3gw.env.example`; `LIST_RANGES` читается только при создании `bulk.db`). Тогда `listed_objects` в `bulk-status.json` может часами оставаться 0: MinIO обходит каталог бакета, это не зависание. Затем:
 
 ```bash
 systemctl enable --now s3gw-handler && systemctl start s3gw-bulk   # run: листинг готов, сразу copy; продолжает с контрольных точек
