@@ -114,7 +114,11 @@ mc admin policy attach $ALIAS s3gw-src-ro --user s3gw-src            # стар�
 
 ```bash
 mc alias set s3gwro http://127.0.0.1:9000 s3gw-src "$SECRET"
-mc ls s3gwro/s3elma365 | head -3        # видны объекты
+# Любой листинг 12 млн ключей в корне бакета идёт долго (mc ls, mc stat отсутствующего ключа, даже max-keys=1).
+# Права MinIO проверяет до листинга, поэтому отказ пришёл бы сразу.
+A=(-s -m 10 --aws-sigv4 "aws:amz:ru-central-1:s3" --user "s3gw-src:$SECRET")
+curl "${A[@]}" -I -o /dev/null -w 'HEAD %{http_code}\n' http://127.0.0.1:9000/s3elma365/_ro_check    # HEAD 404: чтение есть (403 — нет прав, 400 — другой регион)
+curl "${A[@]}" -o /dev/null -w 'LIST %{http_code}\n' "http://127.0.0.1:9000/s3elma365?list-type=2&max-keys=1"   # LIST 200 или 000 (тайм-аут: MinIO листает); 403 — нет прав
 echo x | mc pipe s3gwro/s3elma365/_ro_check   # отказ: mc 2025 пишет Insufficient permissions, старые — Access Denied
 ```
 

@@ -326,8 +326,8 @@ class Stand:
         self.check("A1 policy and user created, SECRET kept for later steps", rc == 0 and len(self.var("SECRET")) == 40, rc)
         denied = ("Insufficient permissions", "Access Denied")  # mc 2025-08, older mc
         rc, out = self.block("A1 check", 'echo x | mc pipe s3gwro/s3elma365/_ro_check', errors_ok=denied)
-        self.check("A1 the key lists the bucket and cannot write", any(d in out for d in denied) and len(
-            [line for line in out.splitlines() if line.startswith("[")]) == 3, out.strip().splitlines()[-2:])
+        self.check("A1 the key reads, lists and cannot write", any(d in out for d in denied) and "HEAD 404" in out
+                   and re.search(r"^LIST (200|000)$", out, re.M) is not None, out.strip().splitlines()[-3:])
 
         rc, out = self.block("A2 install", "useradd --system --home /var/lib/s3gw", subs=[
             ("git clone https://github.com/laktes1/elma365_s3_migrator /opt/elma365_s3_migrator",
